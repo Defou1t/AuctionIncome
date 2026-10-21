@@ -4,7 +4,7 @@ local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
     desc = "Counts auction income and purchase spending only for the items you choose.",
-    version = "1.5.0"
+    version = "1.6.1"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -97,6 +97,9 @@ local state = {
     -- Lots on the auction now, and deposits lost on lots that did not sell.
     listings = {},
     fees = {},
+    -- Closed periods: totals here, their records in auction_income_archive_*.lua.
+    archives = {},
+    periodStart = "",
     mode = "sell",
     slotCount = {sell = C.DEFAULT_SLOTS, buy = C.DEFAULT_SLOTS},
     feeRatio = "",
@@ -121,8 +124,7 @@ local pendingArrivals = {}
 local lastMailMs = -1000000
 local lastSentMailMs = -1000000
 local lastMoney
-local lastSaleKey, lastSaleMs = nil, -1000000
-local lastRecorded, lastOther, lastBuy
+local lastRecorded, lastBuy
 -- Raw icon paths seen this session, by item ID. Stored paths use "/" because
 -- the raw "Game\ui\icon\..." form does not survive File:Write.
 local iconCache = {}
@@ -287,7 +289,7 @@ end
 local function load()
     local ok, loaded = pcall(api.File.Read, api.File, DATA_FILE)
     if not ok or type(loaded) ~= "table" then return end
-    for _, key in ipairs({"items", "sales", "other", "buyItems", "buys", "auctionSpends", "listings", "fees"}) do
+    for _, key in ipairs({"items", "sales", "other", "buyItems", "buys", "auctionSpends", "listings", "fees", "archives"}) do
         if type(loaded[key]) == "table" then state[key] = loaded[key] end
     end
     -- v1.1.0 stored icon paths with backslashes turned into quotes.
@@ -301,6 +303,7 @@ local function load()
     end
     if loaded.feeRatio ~= nil then state.feeRatio = tostring(loaded.feeRatio) end
     if loaded.listingRate ~= nil then state.listingRate = tostring(loaded.listingRate) end
+    if type(loaded.periodStart) == "string" then state.periodStart = loaded.periodStart end
     if type(loaded.mailEventsSeen) == "boolean" then state.mailEventsSeen = loaded.mailEventsSeen end
     if type(loaded.debug) == "boolean" then state.debug = loaded.debug end
     for _, key in ipairs({"buttonX", "buttonY", "winX", "winY", "dbgX", "dbgY"}) do
@@ -1147,14 +1150,14 @@ local function shortTime(text)
     return text
 end
 
-local PERIODS = {{"today", "Today"}, {"week", "7 days"}, {"month", "30 days"}, {"all", "All time"}}
+local PERIODS = {{"today", "Today"}, {"week", "7 days"}, {"month", "30 days"}, {"all", "Period"}}
 local GRID_ROWS = {"Received", "In mail", "Spent", "Lost fees", "Net"}
 
 -- Fixed part of the window above the slots, and the height of everything
 -- below them (the lower panel moves down as slot rows are added).
 local SLOTS_Y = 221
 local SLOT_STEP = 50
-local LOWER_H = 512
+local LOWER_H = 540
 
 local itemPage = {sell = 1, buy = 1}
 
@@ -1219,6 +1222,7 @@ refresh = function()
     local buying = state.mode == "buy"
     local list = itemsOf(state.mode)
     local slots = slotCount(state.mode)
+    ui.periodLabel:SetText("Period since " .. shortTime(state.periodStart))
     ui.sellModeBtn:SetText(buying and "Selling" or "> Selling <")
     ui.buyModeBtn:SetText(buying and "> Buying <" or "Buying")
     ui.itemsHeader:SetText(buying and "Items you BUY (drag from the bag; right-click a slot removes)"
@@ -1314,11 +1318,132 @@ local function changePage(delta)
     refresh()
 end
 
+-- ------------------------------------------------------------
+-- Periods: "New period" closes the current statistics into an archive.
+-- Kept for the new period: item lists, sales whose money is still in the
+-- mail, lots on the auction and auction buys not taken from the mail yet.
+-- ------------------------------------------------------------
+
+local ARCHIVE_ROWS = 8
+local archivePage, newPeriodArmedMs = 1, -100000
+
+local function earliestRecordTime()
+    local earliest
+    local function consider(text)
+        if type(text) == "string" and text ~= "" and text ~= "?" and (not earliest or text < earliest) then earliest = text end
+    end
+    for _, sale in ipairs(state.sales) do consider(sale.soldAt) end
+    for _, buy in ipairs(state.buys) do consider(buy.at) end
+    for _, lost in ipairs(state.fees) do consider(lost.listedAt or lost.at) end
+    return earliest
+end
+
+local function refreshArchives()
+    if not ui.archiveWin then return end
+    local total = #state.archives
+    local pages = math.max(math.ceil(total / ARCHIVE_ROWS), 1)
+    archivePage = math.min(math.max(archivePage, 1), pages)
+    for row = 1, ARCHIVE_ROWS do
+        -- Newest first.
+        local index = total - ((archivePage - 1) * ARCHIVE_ROWS + row) + 1
+        local entry = state.archives[index]
+        local lines = ui.archiveRows[row]
+        if entry then
+            lines[1]:SetText("#" .. index .. "   " .. shortTime(entry.from) .. "  -  " .. shortTime(entry.to)
+                .. "   (sold " .. tostring(entry.sold) .. ", bought " .. tostring(entry.bought) .. ")")
+            lines[2]:SetText("Received " .. tostring(entry.received) .. "   Spent " .. tostring(entry.spent)
+                .. "   Lost fees " .. tostring(entry.fees) .. "   Net " .. tostring(entry.net))
+        else
+            lines[1]:SetText(row == 1 and total == 0 and "No archived periods yet. 'New period' in the main window creates one." or "")
+            lines[2]:SetText("")
+        end
+    end
+    ui.archivePageLabel:SetText(total > 0 and ("Page " .. archivePage .. " / " .. pages .. "   (" .. total .. " periods)") or "")
+end
+
+local function createArchiveWindow()
+    local width, height = 660, 120 + ARCHIVE_ROWS * 44
+    ui.archiveWin = makePaperWindow("auction_income_archive" .. idSuffix, "Archived periods", width, height, "arcX", "arcY")
+    ui.archiveRows = {}
+    for row = 1, ARCHIVE_ROWS do
+        local y = 46 + (row - 1) * 44
+        ui.archiveRows[row] = {
+            makeLabel(ui.archiveWin, "aia_" .. row .. "_1", "", 16, y, width - 32, 20, 13),
+            makeLabel(ui.archiveWin, "aia_" .. row .. "_2", "", 32, y + 20, width - 48, 20, 13),
+        }
+    end
+    local pageY = 50 + ARCHIVE_ROWS * 44
+    makeButton(ui.archiveWin, "aia_prev", "<", 16, pageY, 36, 24, function() archivePage = archivePage - 1; refreshArchives() end)
+    makeButton(ui.archiveWin, "aia_next", ">", 56, pageY, 36, 24, function() archivePage = archivePage + 1; refreshArchives() end)
+    ui.archivePageLabel = makeLabel(ui.archiveWin, "aia_page", "", 100, pageY + 2, 400, 20, 13)
+    ui.archiveWin:Show(false)
+end
+
+local function toggleArchiveWin()
+    if not ui.archiveWin then return end
+    local show = not ui.archiveWin:IsVisible()
+    if show then archivePage = 1; refreshArchives() end
+    ui.archiveWin:Show(show)
+end
+
+local function archivePeriod()
+    local totals = computeTotals().all
+    local t = now()
+    local closedSales, keptSales = {}, {}
+    local sold, bought = 0, 0
+    for _, sale in ipairs(state.sales) do
+        if saleGot(sale) then
+            table.insert(closedSales, sale)
+            sold = sold + (tonumber(sale.count) or 1)
+        else
+            table.insert(keptSales, sale)
+        end
+    end
+    for _, buy in ipairs(state.buys) do bought = bought + (tonumber(buy.count) or 1) end
+    local from = state.periodStart ~= "" and state.periodStart or (earliestRecordTime() or t.text)
+    local file = "auction_income_archive_" .. t.day .. "_" .. (#state.archives + 1) .. ".lua"
+    local ok, err = pcall(api.File.Write, api.File, file, {
+        from = from, to = t.text, sales = closedSales, buys = state.buys, fees = state.fees,
+    })
+    if not ok then
+        setStatus("Archive failed, nothing was changed: " .. tostring(err))
+        return
+    end
+    table.insert(state.archives, {
+        from = from, to = t.text, file = file,
+        received = formatMoney(totals.got), spent = formatMoney(totals.spent), fees = formatMoney(totals.fees),
+        net = formatMoney(moneySub(moneySub(totals.got, totals.spent), totals.fees)),
+        sold = fmt(sold), bought = fmt(bought),
+    })
+    state.sales = keptSales
+    state.buys = {}
+    state.fees = {}
+    state.periodStart = t.text
+    save()
+    refresh()
+    refreshArchives()
+    log("Period archived (" .. file .. "). New period started " .. t.text .. ".")
+    setStatus("Archived as #" .. #state.archives .. ". New period started.")
+end
+
+-- Two clicks within 5 seconds, so a stray click cannot close a period.
+local function newPeriod()
+    local ms = nowMs()
+    if ms - newPeriodArmedMs <= 5000 then
+        newPeriodArmedMs = -100000
+        archivePeriod()
+    else
+        newPeriodArmedMs = ms
+        setStatus("Click 'New period' again within 5 seconds to archive the current statistics and start over.")
+    end
+end
+
 local function createMainWindow()
     ui.mainWin = makePaperWindow("auction_income_main" .. idSuffix, "Auction Income", C.WIN_W, C.WIN_H, "winX", "winY")
 
     ui.sellModeBtn = makeButton(ui.mainWin, "ai_mode_sell", "Selling", 16, 42, 130, 26, function() setMode("sell") end)
     ui.buyModeBtn = makeButton(ui.mainWin, "ai_mode_buy", "Buying", 152, 42, 130, 26, function() setMode("buy") end)
+    ui.periodLabel = makeLabel(ui.mainWin, "ai_period", "", 296, 46, C.WIN_W - 312, 20, 13, ALIGN.RIGHT)
 
     local gridY, colX, colW = 76, 100, 128
     for column, period in ipairs(PERIODS) do
@@ -1396,7 +1521,9 @@ local function createMainWindow()
         refresh()
         refreshDebug()
     end)
-    ui.statusLabel = makeLabel(ui.lowerPanel, "ai_status", "", 146, bottomY + 3, C.WIN_W - 160, 22, 13)
+    makeButton(ui.lowerPanel, "ai_new_period", "New period", 142, bottomY, 130, 26, function() newPeriod() end)
+    makeButton(ui.lowerPanel, "ai_archives", "Archives", 278, bottomY, 110, 26, function() toggleArchiveWin() end)
+    ui.statusLabel = makeLabel(ui.lowerPanel, "ai_status", "", 16, bottomY + 32, C.WIN_W - 32, 22, 13)
 
     ui.mainWin:Show(false)
 end
@@ -1613,11 +1740,7 @@ end
 
 local function rememberOther(price, count)
     -- Untracked sales are remembered only so their mail money is not mistaken
-    -- for a tracked sale of a similar price. The event and the chat notice of
-    -- the same sale must not leave two entries.
-    local ms = nowMs()
-    if lastOther and lastOther.gross == fmt(price) and ms - lastOther.ms < C.DEDUP_MS then return end
-    lastOther = {gross = fmt(price), ms = ms}
+    -- for a tracked sale of a similar price. Equal prices are separate lots.
     table.insert(state.other, {gross = fmt(price), count = fmt(count or 1), at = now().epoch})
     while #state.other > C.MAX_OTHER do table.remove(state.other, 1) end
     save()
@@ -1693,12 +1816,10 @@ local function parseAuctionArgs(args, list)
     return sale
 end
 
+-- The client sends one AUCTION_BOUGHT_BY_SOMEONE per sold lot, and several
+-- lots at the same price can sell within a second (seen: three Armor Regrade
+-- Scrolls at 24g 54s 93c in 3 s), so identical events are NOT duplicates.
 local function onAuctionSold(args)
-    local key = dumpArgs(args)
-    local ms = nowMs()
-    if key == lastSaleKey and ms - lastSaleMs < 3000 then return end
-    lastSaleKey, lastSaleMs = key, ms
-
     local sale = parseAuctionArgs(args, state.items)
     if sale.item then
         -- Learn the ID of an item that was added by name only.
@@ -1912,7 +2033,7 @@ for name in pairs(NOTICE_EVENTS) do EVENTS[#EVENTS + 1] = name end
 retire = function()
     if not alive then return end
     alive = false
-    for _, key in ipairs({"mainWin", "debugWin", "floatingBtn"}) do
+    for _, key in ipairs({"mainWin", "debugWin", "archiveWin", "floatingBtn"}) do
         local widget = ui[key]
         if widget then pcall(function() widget:Show(false) end) end
     end
@@ -2042,6 +2163,8 @@ local function OnLoad()
     instanceId = fmt(nowMs()) .. "-" .. (okRandom and fmt(random) or "0")
     local ok, err = pcall(load)
     if not ok then log("Data load failed: " .. tostring(err)) end
+    -- The first period of an existing install starts with its oldest record.
+    if state.periodStart == "" then state.periodStart = earliestRecordTime() or now().text end
     -- Claim the data file at once, so an older copy still running stops.
     state.owner = instanceId
     pcall(api.File.Write, api.File, DATA_FILE, state)
@@ -2058,6 +2181,8 @@ local function OnLoad()
     if not ok then log("Window failed: " .. tostring(err)) end
     ok, err = pcall(createDebugWindow)
     if not ok then log("Debug window failed: " .. tostring(err)) end
+    ok, err = pcall(createArchiveWindow)
+    if not ok then log("Archive window failed: " .. tostring(err)) end
     api:DoIn(200, function()
         local success, buttonErr = pcall(createFloatingButton)
         if not success then log("Button failed: " .. tostring(buttonErr)) end
@@ -2072,6 +2197,7 @@ local function OnUnload()
     api.On("CHAT_MESSAGE", function() end)
     if ui.mainWin then ui.mainWin:Show(false) end
     if ui.debugWin then ui.debugWin:Show(false) end
+    if ui.archiveWin then ui.archiveWin:Show(false) end
     if ui.floatingBtn then ui.floatingBtn:Show(false) end
     if ui.mailBtn then
         ui.mailBtn:Show(false)

@@ -10,7 +10,7 @@ Counts auction income **only** for the items you pick (for example Weapon / Armo
 
 - **Selling / Buying** lists. Drag an item from your bag onto a slot (Dawnsdrop Check style); right-click a slot to stop tracking it. History stays.
 - **Slots**: 1–24 per list, `-` / `+` buttons. `-` only removes an empty last slot; a full list grows by itself.
-- **Totals** for today, 7 days, 30 days and all time:
+- **Totals** for today, 7 days, 30 days and the current period:
   - **Received** — money taken from the mail for sold items
   - **In mail** — sold, money not taken yet
   - **Spent** — bought items
@@ -18,6 +18,7 @@ Counts auction income **only** for the items you pick (for example Weapon / Armo
   - **Net** — Received − Spent − Lost fees
 - Per item: pieces sold or bought, money, average price per piece.
 - Every sale and purchase is saved with date and time; statistics survive game restarts and addon updates.
+- **New period** (click twice within 5 s): archives the current statistics and starts counting from zero. Item lists, lots on the auction and money still in the mail carry over. **Archives** lists past periods with their totals.
 - **Item IDs / Debug** window: drop an item to see its ID, list the IDs of everything in your bag.
 - Manual entry for anything the addon could not see.
 
@@ -50,6 +51,7 @@ Counts auction income **only** for the items you pick (for example Weapon / Armo
 - **Slots** — от 1 до 24 ячеек, кнопки `-` / `+`. `-` убирает только пустую последнюю ячейку.
 - **Итоги** за сегодня, 7 дней, 30 дней и всё время: Received (получено из почты), In mail (продано, не забрано), Spent (покупки), Lost fees (залоги непроданных лотов), Net.
 - Каждая продажа и покупка сохраняется с датой и временем; статистика переживает перезапуск игры и обновление аддона.
+- **New period** (два нажатия за 5 секунд) — закрыть текущую статистику в архив и начать заново; **Archives** — прошлые периоды с итогами.
 - **Item IDs / Debug** — ID предмета и всего содержимого сумки.
 
 Аддон запоминает лот при выставлении (предмет, количество, залог), ловит событие продажи, сопоставляет деньги из почты с продажей, а вернувшийся непроданный лот записывает как потерянный залог. Покупка на аукционе — списание денег и новое письмо; сумма привязывается к предмету, когда вы забираете его из почты.
