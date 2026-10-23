@@ -4,7 +4,7 @@ local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
     desc = "Counts auction income and purchase spending only for the items you choose.",
-    version = "1.6.1"
+    version = "1.7.0"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -488,6 +488,14 @@ local function formatMoney(m)
     return sign .. string.format("%.0fg %02ds %02dc", gold, math.floor(copper / 100), copper % 100)
 end
 
+-- An item switched Off stays in its list and keeps recording, but its
+-- records are left out of every total until it is switched On again.
+-- Records of items no longer in the list still count (their history stays).
+local function isCounted(list, record)
+    local item = itemForRecord(list, record)
+    return not (item and item.off)
+end
+
 local function computeTotals()
     local t = now()
     local nowEpoch = tonumber(t.epoch) or 0
@@ -504,7 +512,9 @@ local function computeTotals()
     end
     for _, sale in ipairs(state.sales) do
         local got = saleGot(sale)
-        if got then
+        if not isCounted(state.items, sale) then
+            -- switched Off
+        elseif got then
             -- Collected money belongs to the day it reached the wallet.
             add(sale.collectedDay, tonumber(sale.collectedEpoch) or 0, "got", got)
         else
@@ -512,10 +522,14 @@ local function computeTotals()
         end
     end
     for _, buy in ipairs(state.buys) do
-        add(buy.day, tonumber(buy.epoch) or 0, "spent", tonumber(buy.cost) or 0)
+        if isCounted(state.buyItems, buy) then
+            add(buy.day, tonumber(buy.epoch) or 0, "spent", tonumber(buy.cost) or 0)
+        end
     end
     for _, lost in ipairs(state.fees) do
-        add(lost.day, tonumber(lost.epoch) or 0, "fees", tonumber(lost.fee) or 0)
+        if isCounted(state.items, lost) then
+            add(lost.day, tonumber(lost.epoch) or 0, "fees", tonumber(lost.fee) or 0)
+        end
     end
     return buckets
 end
@@ -1255,12 +1269,16 @@ refresh = function()
         local widgets = ui.itemRows[row]
         widgets.index = index
         if item then
-            widgets.label:SetText(buying and buyRowText(index, item) or sellRowText(index, item))
+            local text = buying and buyRowText(index, item) or sellRowText(index, item)
+            widgets.label:SetText(item.off and ("(not counted) " .. text) or text)
             widgets.label:Show(true)
+            widgets.counted:SetText(item.off and "Off" or "On")
+            widgets.counted:Show(true)
             widgets.remove:Show(true)
         else
             widgets.label:SetText("")
             widgets.label:Show(false)
+            widgets.counted:Show(false)
             widgets.remove:Show(false)
         end
     end
@@ -1318,6 +1336,15 @@ local function changePage(delta)
     refresh()
 end
 
+local function toggleCounted(index)
+    local item = itemsOf(state.mode)[index]
+    if not item then return end
+    item.off = not item.off
+    save()
+    setStatus(tostring(item.name) .. (item.off and " is left out of the totals (still recorded)." or " counts in the totals again."))
+    refresh()
+end
+
 -- ------------------------------------------------------------
 -- Periods: "New period" closes the current statistics into an archive.
 -- Kept for the new period: item lists, sales whose money is still in the
@@ -1326,6 +1353,9 @@ end
 
 local ARCHIVE_ROWS = 8
 local archivePage, newPeriodArmedMs = 1, -100000
+-- Deleting is two clicks within 5 s on the same button; "armed" remembers
+-- which archive (or "all") the first click was for.
+local archiveArmed = {key = nil, ms = -100000}
 
 local function earliestRecordTime()
     local earliest
@@ -1348,6 +1378,8 @@ local function refreshArchives()
         local index = total - ((archivePage - 1) * ARCHIVE_ROWS + row) + 1
         local entry = state.archives[index]
         local lines = ui.archiveRows[row]
+        lines.index = index
+        lines.remove:Show(entry ~= nil)
         if entry then
             lines[1]:SetText("#" .. index .. "   " .. shortTime(entry.from) .. "  -  " .. shortTime(entry.to)
                 .. "   (sold " .. tostring(entry.sold) .. ", bought " .. tostring(entry.bought) .. ")")
@@ -1359,23 +1391,71 @@ local function refreshArchives()
         end
     end
     ui.archivePageLabel:SetText(total > 0 and ("Page " .. archivePage .. " / " .. pages .. "   (" .. total .. " periods)") or "")
+    ui.archiveClear:Show(total > 0)
+end
+
+local function setArchiveStatus(text)
+    if ui.archiveStatus then ui.archiveStatus:SetText(tostring(text or "")) end
+end
+
+local function confirmArchive(key, question)
+    local ms = nowMs()
+    if archiveArmed.key == key and ms - archiveArmed.ms <= 5000 then
+        archiveArmed.key = nil
+        return true
+    end
+    archiveArmed.key, archiveArmed.ms = key, ms
+    setArchiveStatus(question .. " Click again within 5 seconds to confirm.")
+    return false
+end
+
+-- The addon API cannot delete files, so a deleted archive's file is
+-- overwritten with an empty marker instead.
+local function forgetArchiveFile(entry)
+    if entry and entry.file then pcall(api.File.Write, api.File, entry.file, {deleted = true}) end
+end
+
+local function deleteArchive(index)
+    local entry = state.archives[index]
+    if not entry then return end
+    if not confirmArchive("one:" .. tostring(entry.file), "Delete archive #" .. index .. "?") then return end
+    table.remove(state.archives, index)
+    forgetArchiveFile(entry)
+    save()
+    setArchiveStatus("Archive #" .. index .. " deleted.")
+    refreshArchives()
+end
+
+local function clearArchives()
+    if #state.archives == 0 then return end
+    if not confirmArchive("all", "Delete ALL " .. #state.archives .. " archived periods?") then return end
+    for _, entry in ipairs(state.archives) do forgetArchiveFile(entry) end
+    state.archives = {}
+    save()
+    setArchiveStatus("All archives deleted.")
+    refreshArchives()
 end
 
 local function createArchiveWindow()
-    local width, height = 660, 120 + ARCHIVE_ROWS * 44
+    local width, height = 660, 140 + ARCHIVE_ROWS * 44
     ui.archiveWin = makePaperWindow("auction_income_archive" .. idSuffix, "Archived periods", width, height, "arcX", "arcY")
     ui.archiveRows = {}
     for row = 1, ARCHIVE_ROWS do
         local y = 46 + (row - 1) * 44
-        ui.archiveRows[row] = {
-            makeLabel(ui.archiveWin, "aia_" .. row .. "_1", "", 16, y, width - 32, 20, 13),
-            makeLabel(ui.archiveWin, "aia_" .. row .. "_2", "", 32, y + 20, width - 48, 20, 13),
+        local lines = {
+            makeLabel(ui.archiveWin, "aia_" .. row .. "_1", "", 16, y, width - 70, 20, 13),
+            makeLabel(ui.archiveWin, "aia_" .. row .. "_2", "", 32, y + 20, width - 86, 20, 13),
         }
+        lines.remove = makeButton(ui.archiveWin, "aia_rm_" .. row, "X", width - 46, y + 8, 26, 22,
+            function() deleteArchive(lines.index) end)
+        ui.archiveRows[row] = lines
     end
     local pageY = 50 + ARCHIVE_ROWS * 44
     makeButton(ui.archiveWin, "aia_prev", "<", 16, pageY, 36, 24, function() archivePage = archivePage - 1; refreshArchives() end)
     makeButton(ui.archiveWin, "aia_next", ">", 56, pageY, 36, 24, function() archivePage = archivePage + 1; refreshArchives() end)
-    ui.archivePageLabel = makeLabel(ui.archiveWin, "aia_page", "", 100, pageY + 2, 400, 20, 13)
+    ui.archivePageLabel = makeLabel(ui.archiveWin, "aia_page", "", 100, pageY + 2, 300, 20, 13)
+    ui.archiveClear = makeButton(ui.archiveWin, "aia_clear", "Clear all", width - 130, pageY, 110, 24, clearArchives)
+    ui.archiveStatus = makeLabel(ui.archiveWin, "aia_status", "", 16, pageY + 30, width - 32, 20, 13)
     ui.archiveWin:Show(false)
 end
 
@@ -1394,12 +1474,14 @@ local function archivePeriod()
     for _, sale in ipairs(state.sales) do
         if saleGot(sale) then
             table.insert(closedSales, sale)
-            sold = sold + (tonumber(sale.count) or 1)
+            if isCounted(state.items, sale) then sold = sold + (tonumber(sale.count) or 1) end
         else
             table.insert(keptSales, sale)
         end
     end
-    for _, buy in ipairs(state.buys) do bought = bought + (tonumber(buy.count) or 1) end
+    for _, buy in ipairs(state.buys) do
+        if isCounted(state.buyItems, buy) then bought = bought + (tonumber(buy.count) or 1) end
+    end
     local from = state.periodStart ~= "" and state.periodStart or (earliestRecordTime() or t.text)
     local file = "auction_income_archive_" .. t.day .. "_" .. (#state.archives + 1) .. ".lua"
     local ok, err = pcall(api.File.Write, api.File, file, {
@@ -1484,7 +1566,9 @@ local function createMainWindow()
     for row = 1, C.ITEM_PAGE_ROWS do
         local y = 2 + (row - 1) * 22
         local widgets = {index = row}
-        widgets.label = makeLabel(ui.lowerPanel, "ai_item_" .. row, "", 16, y, C.WIN_W - 70, 20, 13)
+        widgets.label = makeLabel(ui.lowerPanel, "ai_item_" .. row, "", 16, y, C.WIN_W - 124, 20, 13)
+        widgets.counted = makeButton(ui.lowerPanel, "ai_item_on_" .. row, "On", C.WIN_W - 102, y - 1, 50, 20,
+            function() toggleCounted(widgets.index) end)
         widgets.remove = makeButton(ui.lowerPanel, "ai_item_rm_" .. row, "X", C.WIN_W - 46, y - 1, 26, 20,
             function() removeItem(widgets.index) end)
         ui.itemRows[row] = widgets
@@ -2026,7 +2110,10 @@ local NOTICE_EVENTS = {
 }
 
 local EVENTS = {"PLAYER_MONEY", "AUCTION_BOUGHT_BY_SOMEONE", "AUCTION_BIDDEN", "ADDED_ITEM",
-    "MAIL_SENT_SUCCESS", "MAIL_SENTBOX_UPDATE", "REMOVED_ITEM"}
+    "MAIL_SENT_SUCCESS", "MAIL_SENTBOX_UPDATE", "REMOVED_ITEM",
+    -- Logged only, for the planned labor calculator: labor spent and the
+    -- vocation proficiency it raises.
+    "LABORPOWER_CHANGED", "ACTABILITY_EXPERT_CHANGED", "ACTABILITY_EXPERT_GRADE_CHANGED", "CRAFT_FAILED"}
 for name in pairs(MAIL_EVENTS) do EVENTS[#EVENTS + 1] = name end
 for name in pairs(NOTICE_EVENTS) do EVENTS[#EVENTS + 1] = name end
 

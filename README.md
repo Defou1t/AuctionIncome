@@ -19,6 +19,8 @@ Counts auction income **only** for the items you pick (for example Weapon / Armo
 - Per item: pieces sold or bought, money, average price per piece.
 - Every sale and purchase is saved with date and time; statistics survive game restarts and addon updates.
 - **New period** (click twice within 5 s): archives the current statistics and starts counting from zero. Item lists, lots on the auction and money still in the mail carry over. **Archives** lists past periods with their totals.
+- **On / Off** per item: Off leaves the item out of all totals but keeps it in the list and keeps recording it; On counts it again.
+- **Archives** window: delete one period (X) or all of them (Clear all), both confirmed by a second click.
 - **Item IDs / Debug** window: drop an item to see its ID, list the IDs of everything in your bag.
 - Manual entry for anything the addon could not see.
 
