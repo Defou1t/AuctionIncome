@@ -4,7 +4,7 @@ local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
     desc = "Counts auction income and purchase spending only for the items you choose.",
-    version = "1.9.0"
+    version = "1.9.1"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -28,7 +28,7 @@ C.BAG_ROWS = 10
 C.LOG_ROWS = 8
 C.MAX_RECORDS = 3000
 C.MAX_OTHER = 200
-C.MAX_DEBUG = 300
+C.MAX_DEBUG = 1000
 C.MAX_ARGS = 12
 -- Lowest share of the sale price we still accept as "this mail paid that
 -- sale" (the auction house keeps a commission).
@@ -317,7 +317,15 @@ local function load()
             if type(state.session[key]) ~= "table" then state.session[key] = {} end
         end
     end
-    if type(loaded.laborStumps) == "table" then state.laborStumps = loaded.laborStumps end
+    if type(loaded.laborCarry) == "table" then state.laborCarry = loaded.laborCarry end
+    if type(loaded.laborStumps) == "table" then
+        -- 1.9.0 kept only lit stumps, for the geode harvest.
+        state.laborCarry = state.laborCarry or {}
+        for _, entry in ipairs(loaded.laborStumps) do
+            entry.target = "Alchemy"
+            table.insert(state.laborCarry, entry)
+        end
+    end
     if loaded.laborSplit == "manual" then state.laborSplit = "manual" end
     if loaded.laborOff == true then state.laborOff = true end
     if type(loaded.laborView) == "string" then state.laborView = loaded.laborView end
@@ -2167,15 +2175,24 @@ for name in pairs(NOTICE_EVENTS) do EVENTS[#EVENTS + 1] = name end
 
 L = {rows = {}, stageRows = {}, page = 1, activeMs = 0, gapMs = 0, lastTickMs = nil, lastSaveMs = 0,
     lastLaborMs = nil, lastSpendMs = -100000, pending = nil, lastSpend = nil, lastVoc = nil,
-    recent = {}, held = {}, shown = {}, armed = {key = nil, ms = -100000}}
+    recent = {}, shown = {}, armed = {key = nil, ms = -100000}}
 L.ROWS, L.STAGE_ROWS, L.W, L.H = 10, 8, 660, 700
 L.MAIL_TASK, L.LISTING_TASK, L.STUMP_TASK, L.BUY_PAIR_MS = 46, 45, 61, 3000
 -- Loot within WINDOW_MS of a spend is its result; a spend whose loot is known
 -- is settled after SETTLE_MS; time stops counting IDLE_MS after the last spend.
-L.WINDOW_MS, L.SETTLE_MS, L.VOC_LATE_MS, L.HOLD_MS, L.IDLE_MS = 8000, 3000, 90000, 1800000, 600000
+L.WINDOW_MS, L.SETTLE_MS, L.VOC_LATE_MS, L.IDLE_MS = 8000, 3000, 90000, 600000
+-- Pack payments: Charcoal Stabilizer, Dragon Essence Stabilizer (by mail).
+L.PACK_VOCATION, L.PAYOUT_ITEMS = "Commerce", {["32103"] = true, ["32106"] = true}
 -- Loot tasks seen in the client; others show as "task N".
 L.TASK_LABELS = {["91"] = "fishing", ["9"] = "loot", ["33"] = "bundle", ["27"] = "craft"}
-L.GEODE_VOCATION = "Alchemy"
+L.GEODE_VOCATION, L.CRAFT_TASK = "Alchemy", 27
+-- A pack (water, stumps, trade packs) put on the back leaves the bag
+-- "destroy" task 16 and comes back with task 23: moved, not used or gained.
+L.TO_BACK_TASK, L.FROM_BACK_TASK = 16, 23
+-- Made by one activity, used up by the harvest of another: Smoldering Log
+-- Bundle (stumps) under geodes -> Alchemy, Auroria Mineral Water Pack on
+-- archeum trees -> Gathering.
+L.CARRY = {["35265"] = "Alchemy", ["18440"] = "Gathering"}
 L.MARKET_FILE, L.market = "auction_income_market.lua", {}
 L.VIEWS = {"best", "newest", "activity"}
 L.VIEW_TITLES = {best = "View: best per LP", newest = "View: newest", activity = "View: by activity"}
@@ -2427,12 +2444,13 @@ function L.close(carryGap)
 end
 
 -- "Logging (bundle)", "Alchemy" (a geode: no loot), "Alchemy (craft)", "Fishing".
-function L.activityName(vocation, task)
+function L.activityName(vocation, task, lp)
     local label = task and (L.TASK_LABELS[task] or ("task " .. task))
     if vocation and label then return vocation .. " (" .. label .. ")" end
     if vocation then return vocation end
     if label then return label:sub(1, 1):upper() .. label:sub(2) end
-    return "Labor"
+    -- Neither (sport fishing: 18 labor, no vocation, the catch comes later).
+    return lp and ("Labor (" .. fmt(lp) .. " LP)") or "Labor"
 end
 
 -- Does the spend continue the running record? An activity is a vocation
@@ -2453,14 +2471,18 @@ function L.continues(s, spend)
     -- No loot: a miss costs the same labor as a catch; a geode harvest
     -- (no loot, 64) after shard crafting (loot, 30) is another activity.
     if vocation and s.task then return L.hasTask(s, "lp" .. fmt(spend.lp)) end
-    return true
+    if vocation then return true end
+    -- Nothing known: only the same labor continues (-18 sport fishing after
+    -- -13 mining is another activity).
+    return L.hasTask(s, "lp" .. fmt(spend.lp))
 end
 
 -- Names the record after its activity, unless the player renamed it.
-function L.learn(s, vocation, task)
+function L.learn(s, vocation, task, lp)
     s.vocation = s.vocation or vocation
     s.task = s.task or task
-    local name = L.activityName(s.vocation, s.task)
+    s.baseLp = s.baseLp or (lp and fmt(lp))
+    local name = L.activityName(s.vocation, s.task, tonumber(s.baseLp))
     if s.name == "" or s.name == s.activity then s.name = name end
     s.activity = name
 end
@@ -2476,23 +2498,80 @@ function L.addVocation(record, vocation, diff)
     table.insert(record.vocations, {name = vocation, amount = fmt(diff)})
 end
 
-function L.attachHeld(s)
+-- Pack payments come by mail hours after the delivery: gold (taking it costs
+-- 1 Commerce labor) or stabilizers. They go to the latest pack record.
+function L.isPackRecord(record)
+    if record.payouts then return false end
+    if record.vocation then return record.vocation == L.PACK_VOCATION and (tonumber(record.lp) or 0) > 1 end
+    local first = (record.vocations or {})[1]
+    return first ~= nil and first.name == L.PACK_VOCATION and (tonumber(first.amount) or 0) > 1
+end
+
+function L.packRecord()
+    local s = state.session
+    if s and L.isPackRecord(s) then return s end
+    for index = #state.stages, 1, -1 do
+        if L.isPackRecord(state.stages[index]) then return state.stages[index] end
+    end
+    for index = #state.stages, 1, -1 do
+        if state.stages[index].payouts then return state.stages[index] end
+    end
+    local t = now()
+    local stage = {name = "Pack payouts", activity = "Pack payouts", payouts = true, started = t.text, ended = t.text,
+        seconds = "0", lp = "0", manualGold = "0", goldIn = "0", goldOut = "0", vocations = {}, gained = {}, used = {}}
+    table.insert(state.stages, stage)
+    return stage
+end
+
+-- 1.9.0 made a "Commerce" record of 1 labor for every pack payment taken
+-- from the mail (with unrelated items used meanwhile): fold them in.
+function L.migrateClaims()
+    local function isClaim(record)
+        return record.vocation == L.PACK_VOCATION and tonumber(record.lp) == 1 and tonumber(record.spends) == 1
+    end
+    local claims = {}
+    for index = #state.stages, 1, -1 do
+        if isClaim(state.stages[index]) then claims[#claims + 1] = table.remove(state.stages, index) end
+    end
+    if state.session and isClaim(state.session) then
+        claims[#claims + 1] = state.session
+        state.session = nil
+    end
+    for _, claim in ipairs(claims) do L.payout(tonumber(claim.manualGold) or 0, 1) end
+    if #claims > 0 then
+        log(#claims .. " pack payment record(s) moved into the pack record.")
+        save()
+    end
+end
+
+function L.payout(gold, lp, id, count)
+    local record = L.packRecord()
+    if gold and gold ~= 0 then record.manualGold = fmt((tonumber(record.manualGold) or 0) + gold) end
+    if lp and lp > 0 then record.lp = fmt((tonumber(record.lp) or 0) + lp) end
+    if id then
+        local entry = L.bump(record.gained, id, count)
+        if record ~= state.session and not tonumber(entry.price) then
+            local price = L.unitPrice(id, entry.name)
+            entry.price = price and fmt(price) or ""
+        end
+    end
+    if record ~= state.session then L.restamp(record) end
+    L.setStatus("Pack payment " .. (id and (L.itemName(id) .. " x" .. fmt(count)) or formatCopper(gold or 0))
+        .. " added to '" .. tostring(record.name) .. "'.")
+end
+
+function L.attachCarry(s)
+    local carry = state.laborCarry or {}
     local index = 1
-    while index <= #L.held do
-        local entry = L.held[index]
-        if not entry.stump then
-            L.bump(s.used, entry.id, entry.count)
-            table.remove(L.held, index)
+    while index <= #carry do
+        local entry = carry[index]
+        if entry.target == s.vocation then
+            L.bump(s.used, tonumber(entry.id), tonumber(entry.count) or 0)
+            table.remove(carry, index)
         else
             index = index + 1
         end
     end
-end
-
-function L.attachStumps(s)
-    if s.vocation ~= L.GEODE_VOCATION or #(state.laborStumps or {}) == 0 then return end
-    L.merge(s.used, state.laborStumps)
-    state.laborStumps = {}
 end
 
 -- A spend is settled once its activity is known (or can no longer be).
@@ -2507,7 +2586,7 @@ end
 -- a miss of the same labor after one of them too.
 function L.skip(spend)
     local last = L.lastIgnored
-    local ignored = L.isIgnored(L.activityName(spend.vocation, spend.task))
+    local ignored = L.isIgnored(L.activityName(spend.vocation, spend.task, spend.lp))
         or (spend.vocation ~= nil and L.isIgnored(spend.vocation))
         or (spend.task == nil and last ~= nil and last.lp == spend.lp and (spend.vocation == nil or spend.vocation == last.vocation))
     if not ignored then
@@ -2520,6 +2599,15 @@ function L.skip(spend)
 end
 
 function L.commit(spend)
+    local mailNear = L.lastMailMs ~= nil and math.abs(L.lastMailMs - spend.ms) <= L.SETTLE_MS
+    if mailNear and spend.vocation == L.PACK_VOCATION then
+        -- Taking a pack payment from the mail: not an activity of its own.
+        L.payout(spend.gold, spend.lp)
+        L.lastSpend = {ms = spend.ms, record = nil, vocation = spend.vocation}
+        return
+    end
+    -- Money taken from the mailbox is not loot.
+    if mailNear then spend.gold = nil end
     if L.skip(spend) then return end
     local s = state.session
     local carry
@@ -2532,9 +2620,8 @@ function L.commit(spend)
         s = L.newRecord(nil)
         -- The walk from the previous activity, or the settle delay.
         s.seconds = fmt(carry or math.floor(math.max(ms - spend.ms, 0) / 1000))
-        L.attachHeld(s)
     end
-    if not (state.laborSplit == "manual" and s.activity) or s.name == "" then L.learn(s, spend.vocation, spend.task) end
+    if not (state.laborSplit == "manual" and s.activity) or s.name == "" then L.learn(s, spend.vocation, spend.task, spend.lp) end
     if spend.task and not L.hasTask(s, spend.task) then table.insert(s.tasks, spend.task) end
     if not L.hasTask(s, "lp" .. fmt(spend.lp)) then table.insert(s.tasks, "lp" .. fmt(spend.lp)) end
     s.spends = fmt((tonumber(s.spends) or 0) + 1)
@@ -2544,7 +2631,7 @@ function L.commit(spend)
     -- Gold that dropped with the labor (an opened purse): part of the value.
     if spend.gold then s.manualGold = fmt((tonumber(s.manualGold) or 0) + spend.gold) end
     if spend.vocation then L.addVocation(s, spend.vocation, spend.vocDiff) end
-    L.attachStumps(s)
+    L.attachCarry(s)
     L.lastSpend = {ms = spend.ms, record = s, vocation = spend.vocation}
     L.gapMs = math.max(ms - spend.ms, 0)
 end
@@ -2563,6 +2650,10 @@ end
 function L.onEvent(event, args)
     if state.laborOff then return end
     local ms = nowMs()
+    if tostring(event):sub(1, 11) == "MAIL_INBOX_" then
+        L.lastMailMs = ms
+        return
+    end
     if event == "LABORPOWER_CHANGED" then
         local diff = tonumber(args[1])
         if not diff or diff >= 0 then return end -- regeneration
@@ -2579,7 +2670,8 @@ function L.onEvent(event, args)
                 index = index + 1
             end
         end
-        L.lastLaborMs = ms
+        -- Taking a pack payment from the mail costs labor but is not play time.
+        if not (L.lastMailMs and ms - L.lastMailMs <= L.SETTLE_MS) then L.lastLaborMs = ms end
         if L.lastVoc and ms - L.lastVoc.ms <= L.SETTLE_MS then
             spend.vocation, spend.vocDiff = L.lastVoc.name, L.lastVoc.diff
             L.lastVoc = nil
@@ -2607,7 +2699,8 @@ function L.onEvent(event, args)
             return
         end
     elseif event == "PLAYER_MONEY" then
-        local diff = tonumber(args[1])
+        -- The number is rounded to 6 digits (1.97759e+006); the string is exact.
+        local diff = tonumber(args[2]) or tonumber(args[1])
         if not diff or diff == 0 then return end
         if diff < 0 then L.lastSpendMs = ms end
         local s = state.session
@@ -2621,7 +2714,12 @@ function L.onEvent(event, args)
         else s.goldOut = fmt((tonumber(s.goldOut) or 0) - diff) end
     elseif event == "ADDED_ITEM" then
         local id, count, task = linkId(args[1]), math.max(tonumber(args[2]) or 1, 1), tonumber(args[3])
-        if not id or task == L.MAIL_TASK then return end
+        if id and task == L.MAIL_TASK and L.PAYOUT_ITEMS[fmt(id)] then
+            L.payout(nil, nil, id, count)
+            save()
+            return L.refresh()
+        end
+        if not id or task == L.MAIL_TASK or task == L.FROM_BACK_TASK then return end
         -- Gold left just before: bought from a vendor, not produced.
         if ms - L.lastSpendMs <= L.BUY_PAIR_MS then return end
         local spend = L.pending
@@ -2637,12 +2735,14 @@ function L.onEvent(event, args)
     elseif event == "REMOVED_ITEM" then
         local id, count = linkId(args[1]), math.max(tonumber(args[2]) or 1, 1)
         local removeState, task = tostring(args[3] or ""), tonumber(args[4])
-        if not id or task == L.LISTING_TASK then return end
+        if not id or task == L.LISTING_TASK or task == L.TO_BACK_TASK then return end
         if removeState ~= "destroy" and removeState ~= "consume" then return end
-        if task == L.STUMP_TASK then
-            -- A stump lit under a geode: a cost of the geode harvest.
-            state.laborStumps = state.laborStumps or {}
-            L.bump(state.laborStumps, id, count)
+        local target = L.CARRY[fmt(id)]
+        if (target and task ~= L.CRAFT_TASK) or task == L.STUMP_TASK then
+            -- A stump lit under a geode, water poured on an archeum tree: a
+            -- cost of that harvest, whenever it comes.
+            state.laborCarry = state.laborCarry or {}
+            L.bump(state.laborCarry, id, count).target = target or L.GEODE_VOCATION
         elseif L.pending and ms - L.pending.ms <= L.WINDOW_MS then
             L.bump(L.pending.used, id, count)
             return
@@ -2996,9 +3096,11 @@ function L.refresh(force)
         L.resultLabel:SetText("")
     end
     local waiting = {}
-    for _, entry in ipairs(state.laborStumps or {}) do waiting[#waiting + 1] = tostring(entry.name) .. " x" .. tostring(entry.count) end
+    for _, entry in ipairs(state.laborCarry or {}) do
+        waiting[#waiting + 1] = tostring(entry.name) .. " x" .. tostring(entry.count) .. " (" .. tostring(entry.target) .. ")"
+    end
     local notes = {}
-    if #waiting > 0 then notes[#notes + 1] = "Lit, for the next geode harvest: " .. table.concat(waiting, ", ") end
+    if #waiting > 0 then notes[#notes + 1] = "Waiting for the next harvest: " .. table.concat(waiting, ", ") end
     if #(state.laborIgnore or {}) > 0 then notes[#notes + 1] = "Not tracked: " .. table.concat(state.laborIgnore, ", ") end
     L.waitLabel:SetText(table.concat(notes, "   "))
     local entries = L.currentEntries()
@@ -3062,6 +3164,7 @@ function L.createWindow()
     local w = makePaperWindow("auction_income_labor" .. idSuffix, "Labor calculator", L.W, L.H, "laborX", "laborY")
     L.win = w
     L.loadMarket()
+    pcall(L.migrateClaims)
     L.trackBtn = makeButton(w, "al_track", "Tracking: ON", 16, 44, 120, 28, L.toggleTracking)
     L.splitBtn = makeButton(w, "al_split", "Split: auto", 142, 44, 110, 28, L.toggleSplit)
     makeButton(w, "al_new", "New record", 258, 44, 110, 28, L.newRecordClick)
@@ -3123,24 +3226,9 @@ function L.tick(ms)
     end
     local index = 1
     while index <= #L.recent do
-        local entry = L.recent[index]
-        if ms - entry.ms > L.WINDOW_MS then
-            -- Used without labor: belongs to the next activity.
-            table.remove(L.recent, index)
-            L.held[#L.held + 1] = entry
-        else
-            index = index + 1
-        end
-    end
-    index = 1
-    while index <= #L.held do
-        local entry = L.held[index]
-        if ms - entry.ms > L.HOLD_MS then
-            table.remove(L.held, index)
-            if state.session then L.bump(state.session.used, entry.id, entry.count) end
-        else
-            index = index + 1
-        end
+        -- Used without labor (points spent elsewhere, festival coins): not
+        -- a cost of any activity (2026-10-24: they made a mining record -1115g).
+        if ms - L.recent[index].ms > L.WINDOW_MS then table.remove(L.recent, index) else index = index + 1 end
     end
     if not state.session or state.laborOff then L.lastTickMs = nil return end
     if L.lastTickMs then

@@ -30,7 +30,9 @@ The **Labor** button in the main window opens a calculator that answers "what is
 
 - **Records itself.** Tracking is on all game long; every labor spend goes into the current record and a new record starts when the activity changes. An activity is **vocation + loot type**: `Logging (bundle)` (stumps), `Alchemy` (geode harvest), `Alchemy (craft)` (shards into points), `Mining (loot)`, `Fishing` (worm fishing has no vocation, it is recognised by its catch).
 - A record holds labor, play time, items received within 8 s of a spend (+) and items used for it (−: craft materials, bait). Mob loot, quest rewards and vendor purchases are left out. Gold that drops together with the labor (opening purses, Larceny) is added to the record.
-- Stumps lit under a geode wait for the next geode harvest and count as its cost.
+- Stumps lit under a geode wait for the next geode harvest, mineral water poured on an archeum tree for the next tree harvest, and count as its cost. A pack carried on the back is neither used nor gained.
+- **Trade pack payments** that arrive by mail hours later — gold (taking it costs 1 Commerce labor), Charcoal Stabilizer, Dragon Essence Stabilizer — are added to the latest pack (Commerce) record without interrupting the current activity.
+- Items used up without labor (points spent elsewhere, festival coins) are nobody's cost. Labor with neither vocation nor loot (sport fishing, −18) gets its own record, `Labor (18 LP)`.
 - Time: the walk to the next activity belongs to it; after 10 minutes without labor the clock stops (AFK).
 - **Every field is editable**: name, LP, gold +/- (e.g. a trade pack paid 6–8 hours later) and, per item, count (0 removes the row) and price of one piece — `0.04`, `0,04`, `4s`, `1g 20s`, `-47`. One **Save** applies them. Saved records open with **Edit**.
 - **Prices**: your own (set) → market → average of your own auction deals. **Market prices** come from [sermeatball.com](https://sermeatball.com) (7-day auction averages): double-click `update-prices.cmd` in the addon folder, then press **Market** in the window. Addons cannot go online, so the download runs outside the game.
@@ -73,7 +75,8 @@ The **Labor** button in the main window opens a calculator that answers "what is
 **Калькулятор очков работы** (кнопка **Labor**, версия 1.9.0):
 
 - Пишет всю игру сам и делит на записи по занятию = профессия + вид добычи: `Logging (bundle)` (пеньки), `Alchemy` (жеоды), `Alchemy (craft)` (шарды в поинты), `Fishing` и т. д. Сменили занятие — новая запись.
-- В записи: ОР, время, полученные предметы (+), израсходованные (−: материалы, черви), золото с кошельков (Larceny). Лут с мобов и награды заданий не считаются. Подожжённые пеньки входят в затраты следующего сбора жеод.
+- В записи: ОР, время, полученные предметы (+), израсходованные (−: материалы, черви), золото с кошельков (Larceny). Лут с мобов и награды заданий не считаются. Подожжённые пеньки входят в затраты следующего сбора жеод, вылитая на дерево вода — сбора акхиумных деревьев.
+- Оплата паков по почте (золото, Charcoal / Dragon Essence Stabilizer) сама дописывается в последнюю запись с паками.
 - Все поля правятся: имя, ОР, Gold +/- (например оплата паков), количество и цена штуки (`4s`, `0.04`, `1g 20s`) — и одна кнопка **Save**.
 - Цены: своя → рынок с sermeatball.com (`update-prices.cmd` в папке аддона, затем кнопка **Market**) → средняя ваших сделок.
 - **View**: лучшие за 1 ОР / новые / по занятиям; **Items** — сколько предметов в среднем за действие и за 100 ОР.
