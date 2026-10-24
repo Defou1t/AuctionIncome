@@ -4,7 +4,7 @@ local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
     desc = "Counts auction income and purchase spending only for the items you choose.",
-    version = "1.7.0"
+    version = "1.9.0"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -100,6 +100,10 @@ local state = {
     -- Closed periods: totals here, their records in auction_income_archive_*.lua.
     archives = {},
     periodStart = "",
+    -- Labor calculator: saved stages, manual unit prices by item id, and the
+    -- stage being tracked (nil when none).
+    stages = {},
+    prices = {},
     mode = "sell",
     slotCount = {sell = C.DEFAULT_SLOTS, buy = C.DEFAULT_SLOTS},
     feeRatio = "",
@@ -110,6 +114,9 @@ local state = {
 }
 
 -- Widgets live in one table: Lua 5.1 allows only 200 locals per chunk.
+-- The labor calculator module; filled in further down, declared here so the
+-- main window's "Labor" button can reach it.
+local L
 local ui = {itemSlots = {}, itemRows = {}, recordRows = {}, gridCells = {}, dbgBagRows = {}, dbgLogRows = {}}
 local dbgPicked
 local bagList, bagPage = {}, 1
@@ -289,7 +296,7 @@ end
 local function load()
     local ok, loaded = pcall(api.File.Read, api.File, DATA_FILE)
     if not ok or type(loaded) ~= "table" then return end
-    for _, key in ipairs({"items", "sales", "other", "buyItems", "buys", "auctionSpends", "listings", "fees", "archives"}) do
+    for _, key in ipairs({"items", "sales", "other", "buyItems", "buys", "auctionSpends", "listings", "fees", "archives", "stages", "prices"}) do
         if type(loaded[key]) == "table" then state[key] = loaded[key] end
     end
     -- v1.1.0 stored icon paths with backslashes turned into quotes.
@@ -304,6 +311,17 @@ local function load()
     if loaded.feeRatio ~= nil then state.feeRatio = tostring(loaded.feeRatio) end
     if loaded.listingRate ~= nil then state.listingRate = tostring(loaded.listingRate) end
     if type(loaded.periodStart) == "string" then state.periodStart = loaded.periodStart end
+    if type(loaded.session) == "table" then
+        state.session = loaded.session
+        for _, key in ipairs({"vocations", "gained", "used", "tasks"}) do
+            if type(state.session[key]) ~= "table" then state.session[key] = {} end
+        end
+    end
+    if type(loaded.laborStumps) == "table" then state.laborStumps = loaded.laborStumps end
+    if loaded.laborSplit == "manual" then state.laborSplit = "manual" end
+    if loaded.laborOff == true then state.laborOff = true end
+    if type(loaded.laborView) == "string" then state.laborView = loaded.laborView end
+    if type(loaded.laborIgnore) == "table" then state.laborIgnore = loaded.laborIgnore end
     if type(loaded.mailEventsSeen) == "boolean" then state.mailEventsSeen = loaded.mailEventsSeen end
     if type(loaded.debug) == "boolean" then state.debug = loaded.debug end
     for _, key in ipairs({"buttonX", "buttonY", "winX", "winY", "dbgX", "dbgY"}) do
@@ -1525,7 +1543,8 @@ local function createMainWindow()
 
     ui.sellModeBtn = makeButton(ui.mainWin, "ai_mode_sell", "Selling", 16, 42, 130, 26, function() setMode("sell") end)
     ui.buyModeBtn = makeButton(ui.mainWin, "ai_mode_buy", "Buying", 152, 42, 130, 26, function() setMode("buy") end)
-    ui.periodLabel = makeLabel(ui.mainWin, "ai_period", "", 296, 46, C.WIN_W - 312, 20, 13, ALIGN.RIGHT)
+    makeButton(ui.mainWin, "ai_labor", "Labor", 288, 42, 100, 26, function() L.toggle() end)
+    ui.periodLabel = makeLabel(ui.mainWin, "ai_period", "", 396, 46, C.WIN_W - 412, 20, 13, ALIGN.RIGHT)
 
     local gridY, colX, colW = 76, 100, 128
     for column, period in ipairs(PERIODS) do
@@ -2113,13 +2132,1042 @@ local EVENTS = {"PLAYER_MONEY", "AUCTION_BOUGHT_BY_SOMEONE", "AUCTION_BIDDEN", "
     "MAIL_SENT_SUCCESS", "MAIL_SENTBOX_UPDATE", "REMOVED_ITEM",
     -- Logged only, for the planned labor calculator: labor spent and the
     -- vocation proficiency it raises.
-    "LABORPOWER_CHANGED", "ACTABILITY_EXPERT_CHANGED", "ACTABILITY_EXPERT_GRADE_CHANGED", "CRAFT_FAILED"}
+    "LABORPOWER_CHANGED", "ACTABILITY_EXPERT_CHANGED", "ACTABILITY_EXPERT_GRADE_CHANGED", "CRAFT_FAILED",
+    -- Logged only: harvesting a geode spent labor but sent no ADDED_ITEM
+    -- (2026-10-24), so the other ways of receiving things are watched.
+    "ITEM_ACQUISITION_BY_LOOT", "MONEY_ACQUISITION_BY_LOOT", "LOOT_BAG_CLOSE", "LOOT_PACK_ITEM_BROADCAST",
+    "PLAYER_LIVING_POINT", "PLAYER_CONTRIBUTION_POINT", "PLAYER_AA_POINT"}
 for name in pairs(MAIL_EVENTS) do EVENTS[#EVENTS + 1] = name end
 for name in pairs(NOTICE_EVENTS) do EVENTS[#EVENTS + 1] = name end
+
+-- ============================================================
+-- Labor calculator. While tracking is on, every labor spend goes into the
+-- current record; in "auto" split a new record starts when the activity
+-- changes (stumps -> geodes -> fishing), in "manual" only on New record.
+--   LABORPOWER_CHANGED(diff, total)          diff < 0 = labor spent
+--   ACTABILITY_EXPERT_CHANGED(id, vocation, diff, total)
+--                                            same second as the spend for
+--                                            gathering/logging/mining/alchemy,
+--                                            ~1 min late after a craft, never
+--                                            for worm fishing (2026-10-24)
+--   ADDED_ITEM(link, count, task)            loot: task 9 gathering, 33
+--                                            logging/mining, 91 fishing, 27 craft
+--   REMOVED_ITEM(link, count, state, task)   27 craft materials, 39 bait (a few
+--                                            seconds before the spend), 61 a
+--                                            stump lit under a geode, 45 listing
+-- The activity of a spend is its vocation plus the task of its loot (fishing
+-- has no vocation, a geode harvest no loot); see L.continues. Items count only
+-- when they come within 8 s of a spend, so mob loot and quest rewards stay
+-- out. Things used without labor (a lit stump) wait for the next activity:
+-- lit stumps go to the next Alchemy record (the geode harvest).
+-- Value of a record = gained items - used items (at their unit prices)
+-- + gold +/-; then gold per labor point, labor per gold, gold per hour.
+-- Kept in one table: Lua 5.1 allows only 200 locals per chunk.
+-- ============================================================
+
+L = {rows = {}, stageRows = {}, page = 1, activeMs = 0, gapMs = 0, lastTickMs = nil, lastSaveMs = 0,
+    lastLaborMs = nil, lastSpendMs = -100000, pending = nil, lastSpend = nil, lastVoc = nil,
+    recent = {}, held = {}, shown = {}, armed = {key = nil, ms = -100000}}
+L.ROWS, L.STAGE_ROWS, L.W, L.H = 10, 8, 660, 700
+L.MAIL_TASK, L.LISTING_TASK, L.STUMP_TASK, L.BUY_PAIR_MS = 46, 45, 61, 3000
+-- Loot within WINDOW_MS of a spend is its result; a spend whose loot is known
+-- is settled after SETTLE_MS; time stops counting IDLE_MS after the last spend.
+L.WINDOW_MS, L.SETTLE_MS, L.VOC_LATE_MS, L.HOLD_MS, L.IDLE_MS = 8000, 3000, 90000, 1800000, 600000
+-- Loot tasks seen in the client; others show as "task N".
+L.TASK_LABELS = {["91"] = "fishing", ["9"] = "loot", ["33"] = "bundle", ["27"] = "craft"}
+L.GEODE_VOCATION = "Alchemy"
+L.MARKET_FILE, L.market = "auction_income_market.lua", {}
+L.VIEWS = {"best", "newest", "activity"}
+L.VIEW_TITLES = {best = "View: best per LP", newest = "View: newest", activity = "View: by activity"}
+
+function L.formatTime(seconds)
+    seconds = math.floor(tonumber(seconds) or 0)
+    return string.format("%d:%02d:%02d", math.floor(seconds / 3600), math.floor(seconds % 3600 / 60), seconds % 60)
+end
+
+function L.itemName(id)
+    local info = itemInfo(id)
+    return clean(info and info.name or ("Item " .. fmt(id)))
+end
+
+-- Price in gold for an edit box: 2000 copper -> "0.2".
+function L.goldText(copper)
+    copper = tonumber(copper)
+    if not copper then return "" end
+    local text = string.format("%.4f", copper / 10000)
+    text = text:gsub("0+$", "")
+    text = text:gsub("%.$", "")
+    return text
+end
+
+function L.number(text)
+    text = trim(tostring(text or ""))
+    if text == "" then return nil end
+    return tonumber((text:gsub(",", ".")))
+end
+
+-- Lists are arrays of {id, name, count} so File:Write keeps them in order.
+function L.bump(list, id, count)
+    if not id then return end
+    for _, entry in ipairs(list) do
+        if tonumber(entry.id) == tonumber(id) then
+            entry.count = fmt((tonumber(entry.count) or 0) + count)
+            return entry
+        end
+    end
+    local entry = {id = fmt(id), name = L.itemName(tonumber(id)), count = fmt(count)}
+    table.insert(list, entry)
+    return entry
+end
+
+function L.merge(into, from)
+    for _, entry in ipairs(from or {}) do L.bump(into, tonumber(entry.id), tonumber(entry.count) or 0) end
+end
+
+function L.hasTask(record, task)
+    for _, known in ipairs(record.tasks or {}) do
+        if known == task then return true end
+    end
+    return false
+end
+
+-- Market prices by item id (7-day auction average from sermeatball.com),
+-- written by tools\update-prices.ps1 outside the game: addons cannot go online.
+function L.loadMarket()
+    L.market, L.marketUpdated = {}, nil
+    local ok, data = pcall(api.File.Read, api.File, L.MARKET_FILE)
+    if not ok or type(data) ~= "table" or type(data.items) ~= "table" then return false end
+    L.market, L.marketUpdated = data.items, tostring(data.updated or "?")
+    return true
+end
+
+function L.reloadMarket()
+    if L.loadMarket() then
+        L.setStatus("Market prices from " .. L.marketUpdated .. " loaded.")
+    else
+        L.setStatus("No market prices: run tools\\update-prices.ps1 (writes Addon\\" .. L.MARKET_FILE .. ").")
+    end
+    L.refresh(true)
+end
+
+-- "0.04", "0,04", "4s", "1g 20s", "-47", "47c" -> copper; nil if not money.
+function L.money(text)
+    text = trim(tostring(text or "")):lower()
+    text = text:gsub(",", ".")
+    if text == "" then return nil end
+    local value = tonumber(text)
+    if value then
+        value = value * 10000
+    else
+        local sign = 1
+        if text:sub(1, 1) == "-" then sign, text = -1, trim(text:sub(2)) end
+        if (text:gsub("[%d%.]+%s*[gsc]", "")):match("%S") then return nil end
+        local units = {g = 10000, s = 100, c = 1}
+        local found = false
+        value = 0
+        for number, unit in text:gmatch("([%d%.]+)%s*([gsc])") do
+            value = value + (tonumber(number) or 0) * units[unit]
+            found = true
+        end
+        if not found then return nil end
+        value = sign * value
+    end
+    if value < 0 then return -math.floor(-value + 0.5) end
+    return math.floor(value + 0.5)
+end
+
+-- Unit price: one set by hand, else the market price, else the average of
+-- own auction purchases, else the average gross of own auction sales.
+-- nil = no price yet.
+function L.unitPrice(id, name)
+    local manual = tonumber(state.prices[tostring(id)])
+    if manual then return manual, "set" end
+    local market = tonumber(L.market[tostring(id)])
+    if market then return market, "market" end
+    local function matches(record)
+        return tonumber(record.itemId) == tonumber(id) or (name and sameName(record.item, name))
+    end
+    local spent, bought = 0, 0
+    for _, buy in ipairs(state.buys) do
+        if matches(buy) and tonumber(buy.cost) then
+            spent = spent + tonumber(buy.cost)
+            bought = bought + (tonumber(buy.count) or 1)
+        end
+    end
+    if bought > 0 then return math.floor(spent / bought + 0.5), "avg buy" end
+    local gross, sold = 0, 0
+    for _, sale in ipairs(state.sales) do
+        if matches(sale) and tonumber(sale.gross) then
+            gross = gross + tonumber(sale.gross)
+            sold = sold + (tonumber(sale.count) or 1)
+        end
+    end
+    if sold > 0 then return math.floor(gross / sold + 0.5), "avg sale" end
+    return nil
+end
+
+-- The running record uses current prices; a saved one the prices frozen
+-- into it, so it can be completed later (a pack paid 6-8 hours later).
+function L.entryPrice(record, entry)
+    if record == state.session or record.group then return L.unitPrice(tonumber(entry.id), entry.name) end
+    return tonumber(entry.price), "saved"
+end
+
+function L.evaluate(record)
+    local value = newMoney()
+    local unpriced = 0
+    local function add(list, sign)
+        for _, entry in ipairs(list or {}) do
+            local price = L.entryPrice(record, entry)
+            if price then moneyAdd(value, sign * price * (tonumber(entry.count) or 0)) else unpriced = unpriced + 1 end
+        end
+    end
+    add(record.gained, 1)
+    add(record.used, -1)
+    moneyAdd(value, tonumber(record.manualGold) or 0)
+    local labor = (tonumber(record.lp) or 0) + (tonumber(record.manualLp) or 0)
+    local seconds = (tonumber(record.seconds) or 0) + (state.session == record and math.floor(L.activeMs / 1000) or 0)
+    local copper = moneyValue(value)
+    return {
+        value = value, copper = copper, labor = labor, seconds = seconds, unpriced = unpriced,
+        perLp = labor > 0 and copper / labor or nil,
+        lpPerGold = copper > 0 and labor / (copper / 10000) or nil,
+        perHour = seconds >= 60 and copper / (seconds / 3600) or nil,
+    }
+end
+
+function L.restamp(stage)
+    local r = L.evaluate(stage)
+    stage.value = fmt(r.copper)
+    stage.perLp = r.perLp and fmt(r.perLp) or ""
+    stage.lpPerGold = r.lpPerGold and string.format("%.2f", r.lpPerGold) or ""
+    stage.perHour = r.perHour and fmt(r.perHour) or ""
+    stage.unpriced = fmt(r.unpriced)
+    return r
+end
+
+function L.walletText(record)
+    local gotIn, wentOut = tonumber(record.goldIn) or 0, tonumber(record.goldOut) or 0
+    if gotIn == 0 and wentOut == 0 then return "" end
+    return "   wallet: +" .. formatCopper(gotIn) .. " / -" .. formatCopper(wentOut)
+end
+
+function L.summaryText(r)
+    local parts = {"Value " .. formatMoney(r.value)}
+    parts[#parts + 1] = r.perLp and ("1 LP = " .. formatCopper(r.perLp)) or "1 LP = -"
+    parts[#parts + 1] = r.lpPerGold and string.format("1g = %.1f LP", r.lpPerGold) or "1g = -"
+    parts[#parts + 1] = r.perHour and (formatCopper(r.perHour) .. "/h") or "-/h"
+    return table.concat(parts, "   ")
+end
+
+function L.setStatus(text)
+    if L.statusLabel then L.statusLabel:SetText(tostring(text or "")) end
+end
+
+function L.flushTime()
+    local s = state.session
+    if not s then return end
+    local whole = math.floor(L.activeMs / 1000)
+    if whole > 0 then
+        s.seconds = fmt((tonumber(s.seconds) or 0) + whole)
+        L.activeMs = L.activeMs - whole * 1000
+    end
+end
+
+-- ------------------------------------------------------------ records
+
+function L.newRecord(name)
+    local t = now()
+    state.session = {
+        name = name or "", manual = name ~= nil, started = t.text, day = t.day, epoch = t.epoch, seconds = "0",
+        lp = "0", manualLp = "0", manualGold = "0", goldIn = "0", goldOut = "0",
+        vocations = {}, gained = {}, used = {}, tasks = {},
+    }
+    L.activeMs = 0
+    return state.session
+end
+
+-- Closes the running record into the saved list. carryGap: the time since
+-- its last spend belongs to the next activity (walking to it).
+function L.close(carryGap)
+    local s = state.session
+    if not s then return 0 end
+    L.flushTime()
+    local carry = 0
+    if carryGap then
+        carry = math.min(math.floor(L.gapMs / 1000), tonumber(s.seconds) or 0)
+        s.seconds = fmt((tonumber(s.seconds) or 0) - carry)
+    end
+    local r = L.evaluate(s)
+    -- Prices are frozen into the saved record, so later price changes do not
+    -- rewrite history.
+    local function freeze(list)
+        local out = {}
+        for _, entry in ipairs(list or {}) do
+            local price = L.unitPrice(tonumber(entry.id), entry.name)
+            table.insert(out, {id = entry.id, name = entry.name, count = entry.count, price = price and fmt(price) or ""})
+        end
+        return out
+    end
+    local stage = {
+        name = s.name ~= "" and s.name or (s.activity or "Record"), activity = s.activity, auto = not s.manual,
+        vocation = s.vocation, task = s.task, spends = s.spends,
+        started = s.started, ended = now().text, seconds = fmt(r.seconds), lp = fmt(r.labor),
+        vocations = s.vocations, gained = freeze(s.gained), used = freeze(s.used),
+        goldIn = s.goldIn, goldOut = s.goldOut, manualGold = s.manualGold,
+    }
+    L.restamp(stage)
+    table.insert(state.stages, stage)
+    while #state.stages > 200 do table.remove(state.stages, 1) end
+    state.session = nil
+    L.activeMs, L.gapMs = 0, 0
+    if L.lastSpend then L.lastSpend.record = nil end
+    log("Record '" .. tostring(stage.name) .. "' saved: " .. L.summaryText(L.evaluate(stage)))
+    return carry
+end
+
+-- "Logging (bundle)", "Alchemy" (a geode: no loot), "Alchemy (craft)", "Fishing".
+function L.activityName(vocation, task)
+    local label = task and (L.TASK_LABELS[task] or ("task " .. task))
+    if vocation and label then return vocation .. " (" .. label .. ")" end
+    if vocation then return vocation end
+    if label then return label:sub(1, 1):upper() .. label:sub(2) end
+    return "Labor"
+end
+
+-- Does the spend continue the running record? An activity is a vocation
+-- plus the task of its loot; a spend without loot (the fish got away)
+-- continues its vocation, a record of one spend may still learn its task.
+function L.continues(s, spend)
+    if not s then return false end
+    if state.laborSplit == "manual" or s.manual or not s.activity then return true end
+    local young = (tonumber(s.spends) or 0) <= 1
+    local vocation, task = spend.vocation, spend.task
+    if vocation and s.vocation and vocation ~= s.vocation then return false end
+    if vocation and not s.vocation and not young and not s.task then return false end
+    if task then
+        if s.task == task then return true end
+        return s.task == nil and young
+    end
+    if vocation and not s.vocation then return young end
+    -- No loot: a miss costs the same labor as a catch; a geode harvest
+    -- (no loot, 64) after shard crafting (loot, 30) is another activity.
+    if vocation and s.task then return L.hasTask(s, "lp" .. fmt(spend.lp)) end
+    return true
+end
+
+-- Names the record after its activity, unless the player renamed it.
+function L.learn(s, vocation, task)
+    s.vocation = s.vocation or vocation
+    s.task = s.task or task
+    local name = L.activityName(s.vocation, s.task)
+    if s.name == "" or s.name == s.activity then s.name = name end
+    s.activity = name
+end
+
+function L.addVocation(record, vocation, diff)
+    if not record or not diff or diff <= 0 then return end
+    for _, entry in ipairs(record.vocations) do
+        if entry.name == vocation then
+            entry.amount = fmt((tonumber(entry.amount) or 0) + diff)
+            return
+        end
+    end
+    table.insert(record.vocations, {name = vocation, amount = fmt(diff)})
+end
+
+function L.attachHeld(s)
+    local index = 1
+    while index <= #L.held do
+        local entry = L.held[index]
+        if not entry.stump then
+            L.bump(s.used, entry.id, entry.count)
+            table.remove(L.held, index)
+        else
+            index = index + 1
+        end
+    end
+end
+
+function L.attachStumps(s)
+    if s.vocation ~= L.GEODE_VOCATION or #(state.laborStumps or {}) == 0 then return end
+    L.merge(s.used, state.laborStumps)
+    state.laborStumps = {}
+end
+
+-- A spend is settled once its activity is known (or can no longer be).
+function L.isIgnored(name)
+    for _, ignored in ipairs(state.laborIgnore or {}) do
+        if ignored == name then return true end
+    end
+    return false
+end
+
+-- Activities switched off with "Don't track" are dropped, with their loot;
+-- a miss of the same labor after one of them too.
+function L.skip(spend)
+    local last = L.lastIgnored
+    local ignored = L.isIgnored(L.activityName(spend.vocation, spend.task))
+        or (spend.vocation ~= nil and L.isIgnored(spend.vocation))
+        or (spend.task == nil and last ~= nil and last.lp == spend.lp and (spend.vocation == nil or spend.vocation == last.vocation))
+    if not ignored then
+        L.lastIgnored = nil
+        return false
+    end
+    L.lastIgnored = {lp = spend.lp, vocation = spend.vocation}
+    L.lastSpend = {ms = spend.ms, record = nil, vocation = spend.vocation}
+    return true
+end
+
+function L.commit(spend)
+    if L.skip(spend) then return end
+    local s = state.session
+    local carry
+    if s and not L.continues(s, spend) then
+        carry = L.close(true)
+        s = nil
+    end
+    local ms = nowMs()
+    if not s then
+        s = L.newRecord(nil)
+        -- The walk from the previous activity, or the settle delay.
+        s.seconds = fmt(carry or math.floor(math.max(ms - spend.ms, 0) / 1000))
+        L.attachHeld(s)
+    end
+    if not (state.laborSplit == "manual" and s.activity) or s.name == "" then L.learn(s, spend.vocation, spend.task) end
+    if spend.task and not L.hasTask(s, spend.task) then table.insert(s.tasks, spend.task) end
+    if not L.hasTask(s, "lp" .. fmt(spend.lp)) then table.insert(s.tasks, "lp" .. fmt(spend.lp)) end
+    s.spends = fmt((tonumber(s.spends) or 0) + 1)
+    s.lp = fmt((tonumber(s.lp) or 0) + spend.lp)
+    L.merge(s.gained, spend.gained)
+    L.merge(s.used, spend.used)
+    -- Gold that dropped with the labor (an opened purse): part of the value.
+    if spend.gold then s.manualGold = fmt((tonumber(s.manualGold) or 0) + spend.gold) end
+    if spend.vocation then L.addVocation(s, spend.vocation, spend.vocDiff) end
+    L.attachStumps(s)
+    L.lastSpend = {ms = spend.ms, record = s, vocation = spend.vocation}
+    L.gapMs = math.max(ms - spend.ms, 0)
+end
+
+function L.settle()
+    local spend = L.pending
+    if not spend then return end
+    L.pending = nil
+    L.commit(spend)
+    save()
+    L.refresh()
+end
+
+-- ------------------------------------------------------------ events
+
+function L.onEvent(event, args)
+    if state.laborOff then return end
+    local ms = nowMs()
+    if event == "LABORPOWER_CHANGED" then
+        local diff = tonumber(args[1])
+        if not diff or diff >= 0 then return end -- regeneration
+        if L.pending then L.settle() end
+        local spend = {lp = -diff, ms = ms, gained = {}, used = {}}
+        -- Bait goes a few seconds before the cast's labor.
+        local index = 1
+        while index <= #L.recent do
+            local entry = L.recent[index]
+            if ms - entry.ms <= L.WINDOW_MS then
+                L.bump(spend.used, entry.id, entry.count)
+                table.remove(L.recent, index)
+            else
+                index = index + 1
+            end
+        end
+        L.lastLaborMs = ms
+        if L.lastVoc and ms - L.lastVoc.ms <= L.SETTLE_MS then
+            spend.vocation, spend.vocDiff = L.lastVoc.name, L.lastVoc.diff
+            L.lastVoc = nil
+        end
+        -- Settled in L.tick, once its loot (and so its task) is known.
+        L.pending = spend
+        return save()
+    elseif event == "ACTABILITY_EXPERT_CHANGED" then
+        local vocation, diff = clean(args[2] or "?"), tonumber(args[3])
+        if not diff or diff <= 0 then return end
+        if L.pending and not L.pending.vocation then
+            L.pending.vocation, L.pending.vocDiff = vocation, diff
+            return
+        end
+        local s = state.session
+        local last = L.lastSpend
+        if last and last.record == s and s and not last.vocation and ms - last.ms <= L.VOC_LATE_MS then
+            -- A craft reports its vocation about a minute late.
+            last.vocation = vocation
+            if not s.vocation and state.laborSplit ~= "manual" then L.learn(s, vocation, nil) end
+            L.addVocation(s, vocation, diff)
+        else
+            -- May come just before its labor event.
+            L.lastVoc = {name = vocation, diff = diff, ms = ms}
+            return
+        end
+    elseif event == "PLAYER_MONEY" then
+        local diff = tonumber(args[1])
+        if not diff or diff == 0 then return end
+        if diff < 0 then L.lastSpendMs = ms end
+        local s = state.session
+        if diff > 0 and L.pending and ms - L.pending.ms <= L.WINDOW_MS then
+            L.pending.gold = (L.pending.gold or 0) + diff
+        elseif diff > 0 and s and L.lastSpend and L.lastSpend.record == s and ms - L.lastSpend.ms <= L.WINDOW_MS then
+            s.manualGold = fmt((tonumber(s.manualGold) or 0) + diff)
+        end
+        if not s then return end
+        if diff > 0 then s.goldIn = fmt((tonumber(s.goldIn) or 0) + diff)
+        else s.goldOut = fmt((tonumber(s.goldOut) or 0) - diff) end
+    elseif event == "ADDED_ITEM" then
+        local id, count, task = linkId(args[1]), math.max(tonumber(args[2]) or 1, 1), tonumber(args[3])
+        if not id or task == L.MAIL_TASK then return end
+        -- Gold left just before: bought from a vendor, not produced.
+        if ms - L.lastSpendMs <= L.BUY_PAIR_MS then return end
+        local spend = L.pending
+        if spend and ms - spend.ms <= L.WINDOW_MS then
+            L.bump(spend.gained, id, count)
+            spend.task = spend.task or (task and fmt(task))
+            return
+        end
+        local s = state.session
+        if not (s and L.lastSpend and L.lastSpend.record == s and ms - L.lastSpend.ms <= L.WINDOW_MS) then return end
+        L.bump(s.gained, id, count)
+        if task and not L.hasTask(s, fmt(task)) then table.insert(s.tasks, fmt(task)) end
+    elseif event == "REMOVED_ITEM" then
+        local id, count = linkId(args[1]), math.max(tonumber(args[2]) or 1, 1)
+        local removeState, task = tostring(args[3] or ""), tonumber(args[4])
+        if not id or task == L.LISTING_TASK then return end
+        if removeState ~= "destroy" and removeState ~= "consume" then return end
+        if task == L.STUMP_TASK then
+            -- A stump lit under a geode: a cost of the geode harvest.
+            state.laborStumps = state.laborStumps or {}
+            L.bump(state.laborStumps, id, count)
+        elseif L.pending and ms - L.pending.ms <= L.WINDOW_MS then
+            L.bump(L.pending.used, id, count)
+            return
+        else
+            local s = state.session
+            if s and L.lastSpend and L.lastSpend.record == s and ms - L.lastSpend.ms <= L.WINDOW_MS then
+                L.bump(s.used, id, count)
+            else
+                table.insert(L.recent, {id = id, count = count, ms = ms})
+                return
+            end
+        end
+    else
+        return
+    end
+    save()
+    L.refresh()
+end
+
+-- ------------------------------------------------------------ actions
+
+function L.confirm(key, question)
+    local ms = nowMs()
+    if L.armed.key == key and ms - L.armed.ms <= 5000 then
+        L.armed.key = nil
+        return true
+    end
+    L.armed.key, L.armed.ms = key, ms
+    L.setStatus(question .. " Click again within 5 seconds.")
+    return false
+end
+
+function L.toggleTracking()
+    state.laborOff = not state.laborOff or nil
+    if state.laborOff then L.pending = nil end
+    save()
+    L.setStatus(state.laborOff and "Tracking paused: labor is not recorded." or "Tracking on.")
+    L.refresh()
+end
+
+function L.toggleSplit()
+    state.laborSplit = state.laborSplit == "manual" and "auto" or "manual"
+    save()
+    L.setStatus(state.laborSplit == "manual"
+        and "Manual: one record until you press New record (name it in Name and press Save)."
+        or "Auto: a new record starts when the activity changes.")
+    L.refresh()
+end
+
+-- Closes the running record; the next labor starts a new one.
+function L.newRecordClick()
+    if L.pending then L.settle() end
+    L.editing, L.editingGroup = nil, nil
+    if state.session then
+        local name = state.session.name
+        L.close(false)
+        L.setStatus("Saved '" .. tostring(name) .. "'. The next labor starts a new record.")
+    else
+        L.setStatus("The next labor starts a new record.")
+    end
+    save()
+    L.refresh(true)
+end
+
+function L.cancel()
+    if not state.session then return end
+    if not L.confirm("cancel", "Discard the running record without saving?") then return end
+    state.session, L.pending, L.lastSpend = nil, nil, nil
+    L.activeMs, L.gapMs = 0, 0
+    save()
+    L.setStatus("Record discarded.")
+    L.refresh(true)
+end
+
+-- Don't track / Track again: the selected record's activity.
+function L.toggleIgnore()
+    local s = L.selected()
+    local name = s and s.activity
+    if not name then L.setStatus("Select a record made by the tracker (its activity is unknown).") return end
+    state.laborIgnore = state.laborIgnore or {}
+    for index, ignored in ipairs(state.laborIgnore) do
+        if ignored == name then
+            table.remove(state.laborIgnore, index)
+            save()
+            L.setStatus("'" .. name .. "' is tracked again.")
+            return L.refresh(true)
+        end
+    end
+    local live = s == state.session
+    if live and not L.confirm("ignore:" .. name, "Stop tracking '" .. name .. "' and discard this record?") then return end
+    table.insert(state.laborIgnore, name)
+    if live then
+        state.session, L.pending, L.lastSpend = nil, nil, nil
+        L.activeMs, L.gapMs = 0, 0
+    end
+    save()
+    L.setStatus("'" .. name .. "' is not tracked any more. Select one of its records and press Track again to undo.")
+    L.refresh(true)
+end
+
+-- All saved records of one activity summed: items per action and per 100 LP.
+function L.buildGroup(name)
+    local group = {group = true, name = name, count = 0, seconds = 0, lp = 0, value = 0, spends = 0,
+        gained = {}, used = {}, manualGold = "0"}
+    for _, stage in ipairs(state.stages) do
+        if tostring(stage.name) == name then
+            group.count = group.count + 1
+            group.activity = group.activity or stage.activity
+            group.seconds = group.seconds + (tonumber(stage.seconds) or 0)
+            group.lp = group.lp + (tonumber(stage.lp) or 0)
+            group.value = group.value + (tonumber(stage.value) or 0)
+            group.spends = group.spends + (tonumber(stage.spends) or 0)
+            L.merge(group.gained, stage.gained)
+            L.merge(group.used, stage.used)
+        end
+    end
+    group.perLp = group.lp > 0 and group.value / group.lp or nil
+    group.perHour = group.seconds >= 60 and group.value / (group.seconds / 3600) or nil
+    return group
+end
+
+-- Rows show gained (+) then used (-).
+function L.selected()
+    if L.editingGroup then return L.buildGroup(L.editingGroup) end
+    return L.editing or state.session
+end
+
+function L.currentEntries()
+    local s = L.selected()
+    local entries = {}
+    if not s then return entries end
+    for _, entry in ipairs(s.gained or {}) do entries[#entries + 1] = {sign = 1, entry = entry, list = s.gained} end
+    for _, entry in ipairs(s.used or {}) do entries[#entries + 1] = {sign = -1, entry = entry, list = s.used} end
+    return entries
+end
+
+-- Fills an edit box unless the player has typed something new into it.
+function L.put(edit, text, force)
+    text = tostring(text or "")
+    local current = edit:GetText() or ""
+    if force or current == (L.shown[edit] or "") then
+        if current ~= text then edit:SetText(text) end
+        L.shown[edit] = text
+    end
+end
+
+function L.changed(edit)
+    return (edit:GetText() or "") ~= (L.shown[edit] or "")
+end
+
+-- Save: applies every field the player changed.
+function L.save()
+    local s = L.selected()
+    if not s then L.setStatus("Nothing to save: no running record. Press Edit on a saved one.") return end
+    local live = s == state.session
+    -- An activity summary only takes prices; its records keep their own.
+    local summary = s.group
+    local problems = {}
+    if not summary and L.changed(L.nameEdit) then
+        local name = clean(trim(L.nameEdit:GetText()))
+        if name ~= "" then s.name = name end
+    end
+    if not summary and L.changed(L.lpEdit) then
+        local lp = L.number(L.lpEdit:GetText())
+        if lp and lp >= 0 then s.lp, s.manualLp = fmt(lp), "0" else problems[#problems + 1] = "LP" end
+    end
+    if not summary and L.changed(L.goldEdit) then
+        local text = trim(L.goldEdit:GetText())
+        local copper = L.money(text)
+        if copper or text == "" then s.manualGold = fmt(copper or 0) else problems[#problems + 1] = "gold" end
+    end
+    local remove = {}
+    for row = 1, L.ROWS do
+        local widgets = L.rows[row]
+        local item = widgets.item
+        if item then
+            if not summary and L.changed(widgets.count) then
+                local count = L.number(widgets.count:GetText())
+                if count and count >= 0 then
+                    item.entry.count = fmt(count)
+                    if count == 0 then remove[#remove + 1] = item end
+                else
+                    problems[#problems + 1] = "count in row " .. row
+                end
+            end
+            if L.changed(widgets.price) then
+                local text = trim(widgets.price:GetText())
+                local price = L.money(text)
+                if text ~= "" and (not price or price < 0) then
+                    problems[#problems + 1] = "price in row " .. row
+                else
+                    local copper = price and fmt(price) or nil
+                    state.prices[tostring(item.entry.id)] = copper
+                    if not live and not summary then
+                        -- The same item gained and used in one record gets the same price.
+                        for _, list in ipairs({s.gained or {}, s.used or {}}) do
+                            for _, entry in ipairs(list) do
+                                if tostring(entry.id) == tostring(item.entry.id) then entry.price = copper or "" end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for _, item in ipairs(remove) do
+        for index, entry in ipairs(item.list) do
+            if entry == item.entry then table.remove(item.list, index) break end
+        end
+    end
+    if not live and not summary then L.restamp(s) end
+    save()
+    L.refresh(true)
+    if #problems > 0 then
+        L.setStatus("Not understood: " .. table.concat(problems, ", ") .. ". Price of ONE piece: 0.04 or 4s or 1g 20s")
+    elseif summary then
+        L.setStatus("Prices saved for new records; a summary's records keep theirs (Edit a record to change it).")
+    else
+        L.setStatus("Saved. Prices you set are used for all records from now on.")
+    end
+end
+
+function L.deleteStage(index)
+    local stage = L.sortedStages()[(L.page - 1) * L.STAGE_ROWS + index]
+    if not stage or stage.group then return end
+    if not L.confirm("stage:" .. tostring(stage.ended) .. tostring(stage.name), "Delete record '" .. tostring(stage.name) .. "'?") then return end
+    for i, candidate in ipairs(state.stages) do
+        if candidate == stage then table.remove(state.stages, i) break end
+    end
+    if L.editing == stage then L.editing = nil end
+    save()
+    L.setStatus("Record deleted.")
+    L.refresh(true)
+end
+
+function L.toggleEdit(row)
+    local stage = L.sortedStages()[(L.page - 1) * L.STAGE_ROWS + row]
+    if not stage then return end
+    if stage.group then
+        L.editing = nil
+        L.editingGroup = L.editingGroup ~= stage.name and stage.name or nil
+        L.setStatus(L.editingGroup and ("All '" .. stage.name .. "' records: items per action and per 100 LP. Prices can be set here.") or "Back to the running record.")
+        return L.refresh(true)
+    end
+    L.editingGroup = nil
+    if L.editing == stage then
+        L.editing = nil
+        L.setStatus("Back to the running record.")
+    else
+        L.editing = stage
+        L.setStatus("Editing '" .. tostring(stage.name) .. "': change any field and press Save. Done when finished.")
+    end
+    L.refresh(true)
+end
+
+function L.cycleView()
+    local view = state.laborView or "best"
+    for index, name in ipairs(L.VIEWS) do
+        if name == view then view = L.VIEWS[index % #L.VIEWS + 1] break end
+    end
+    state.laborView, L.page = view, 1
+    save()
+    L.refresh()
+end
+
+function L.turnPage(step)
+    local pages = math.max(1, math.ceil(#L.sortedStages() / L.STAGE_ROWS))
+    L.page = math.min(math.max(L.page + step, 1), pages)
+    L.refresh()
+end
+
+-- Records by view; "activity" sums records with the same name.
+function L.sortedStages()
+    local view = state.laborView or "best"
+    local list = {}
+    if view == "activity" then
+        for _, stage in ipairs(state.stages) do
+            local key = tostring(stage.name)
+            local group
+            for _, candidate in ipairs(list) do
+                if candidate.name == key then group = candidate end
+            end
+            if not group then
+                group = {group = true, name = key, count = 0, seconds = 0, lp = 0, value = 0}
+                list[#list + 1] = group
+            end
+            group.count = group.count + 1
+            group.seconds = group.seconds + (tonumber(stage.seconds) or 0)
+            group.lp = group.lp + (tonumber(stage.lp) or 0)
+            group.value = group.value + (tonumber(stage.value) or 0)
+        end
+        for _, group in ipairs(list) do
+            group.perLp = group.lp > 0 and group.value / group.lp or nil
+            group.perHour = group.seconds >= 60 and group.value / (group.seconds / 3600) or nil
+        end
+    else
+        for _, stage in ipairs(state.stages) do list[#list + 1] = stage end
+    end
+    table.sort(list, function(a, b)
+        if view == "newest" then return tostring(a.ended) > tostring(b.ended) end
+        local x, y = tonumber(a.perLp), tonumber(b.perLp)
+        if x and y then return x > y end
+        if x then return true end
+        if y then return false end
+        return tostring(a.ended or a.name) > tostring(b.ended or b.name)
+    end)
+    return list
+end
+
+-- ------------------------------------------------------------ window
+
+function L.refresh(force)
+    if not L.win then return end
+    local s = state.session
+    local selected = L.selected()
+    L.trackBtn:SetText(state.laborOff and "Tracking: OFF" or "Tracking: ON")
+    L.splitBtn:SetText(state.laborSplit == "manual" and "Split: manual" or "Split: auto")
+    L.ignoreBtn:SetText(selected and selected.activity and L.isIgnored(selected.activity) and "Track again" or "Don't track")
+    local key = L.editingGroup and ("group:" .. L.editingGroup) or selected
+    if L.shownRecord ~= key then force, L.shownRecord = true, key end
+    if selected and selected.group then
+        L.stateLabel:SetText("Activity '" .. tostring(selected.name) .. "': " .. selected.count .. " records, "
+            .. (selected.spends > 0 and (selected.spends .. " actions, ") or "") .. L.formatTime(selected.seconds) .. ", LP " .. fmt(selected.lp))
+    elseif L.editing then
+        local r = L.evaluate(L.editing)
+        L.stateLabel:SetText("Editing saved '" .. tostring(L.editing.name) .. "'  " .. shortTime(L.editing.started) .. "  "
+            .. L.formatTime(r.seconds) .. "   LP " .. fmt(r.labor) .. L.walletText(L.editing))
+    elseif s then
+        local r = L.evaluate(s)
+        local vocations = {}
+        for _, entry in ipairs(s.vocations or {}) do vocations[#vocations + 1] = entry.name .. " " .. tostring(entry.amount) end
+        L.stateLabel:SetText((state.laborOff and "Paused: '" or "Recording '") .. tostring(s.name) .. "'  " .. L.formatTime(r.seconds)
+            .. "   LP " .. fmt(r.labor) .. (#vocations > 0 and ("  (" .. table.concat(vocations, ", ") .. ")") or "") .. L.walletText(s))
+    else
+        L.stateLabel:SetText(state.laborOff and "Tracking is OFF." or "Waiting for labor: the next spend starts a record.")
+    end
+    if selected and selected.group then
+        L.put(L.nameEdit, selected.name, force)
+        L.put(L.lpEdit, fmt(selected.lp), force)
+        L.put(L.goldEdit, "", force)
+        L.resultLabel:SetText("Value " .. formatCopper(selected.value) .. "   1 LP = " .. (selected.perLp and formatCopper(selected.perLp) or "-")
+            .. "   " .. (selected.perHour and (formatCopper(selected.perHour) .. "/h") or "-/h"))
+    elseif selected then
+        local r = L.evaluate(selected)
+        L.put(L.nameEdit, selected.name, force)
+        L.put(L.lpEdit, fmt(r.labor), force)
+        L.put(L.goldEdit, L.goldText(tonumber(selected.manualGold) or 0), force)
+        L.resultLabel:SetText(L.summaryText(r) .. (r.unpriced > 0 and ("   (" .. r.unpriced .. " without price)") or ""))
+    else
+        for _, edit in ipairs({L.nameEdit, L.lpEdit, L.goldEdit}) do L.put(edit, "", true) end
+        L.resultLabel:SetText("")
+    end
+    local waiting = {}
+    for _, entry in ipairs(state.laborStumps or {}) do waiting[#waiting + 1] = tostring(entry.name) .. " x" .. tostring(entry.count) end
+    local notes = {}
+    if #waiting > 0 then notes[#notes + 1] = "Lit, for the next geode harvest: " .. table.concat(waiting, ", ") end
+    if #(state.laborIgnore or {}) > 0 then notes[#notes + 1] = "Not tracked: " .. table.concat(state.laborIgnore, ", ") end
+    L.waitLabel:SetText(table.concat(notes, "   "))
+    local entries = L.currentEntries()
+    for row = 1, L.ROWS do
+        local widgets = L.rows[row]
+        local item = entries[row]
+        local rowForce = force or (widgets.item and item and (widgets.item.entry.id ~= item.entry.id or widgets.item.sign ~= item.sign))
+            or (widgets.item and not item)
+        widgets.item = item
+        if item then
+            local count = tonumber(item.entry.count) or 0
+            local price, source = L.entryPrice(selected, item.entry)
+            widgets.label:SetText((item.sign > 0 and "+ " or "- ") .. tostring(item.entry.name))
+            L.put(widgets.count, fmt(count), rowForce)
+            L.put(widgets.price, price and L.goldText(price) or "", rowForce)
+            if selected.group then
+                -- How much one action / 100 LP brings: shards and points per geode.
+                local perAction = selected.spends > 0 and string.format("%.2f per action", count / selected.spends) or ""
+                local perLp = selected.lp > 0 and string.format("%.1f per 100 LP", count * 100 / selected.lp) or ""
+                widgets.total:SetText(perAction .. (perAction ~= "" and "  " or "") .. perLp)
+            else
+                widgets.total:SetText(price and ("= " .. (item.sign > 0 and "" or "-") .. formatCopper(price * count) .. "  (" .. tostring(source) .. ")") or "no price")
+            end
+            widgets.count:Show(true)
+            widgets.price:Show(true)
+        else
+            widgets.label:SetText(row == 1 and selected and "Nothing gained or used." or (row == L.ROWS and #entries > L.ROWS and ("... and " .. (#entries - L.ROWS) .. " more") or ""))
+            widgets.total:SetText("")
+            L.put(widgets.count, "", true)
+            L.put(widgets.price, "", true)
+            widgets.count:Show(false)
+            widgets.price:Show(false)
+        end
+    end
+    local stages = L.sortedStages()
+    local pages = math.max(1, math.ceil(#stages / L.STAGE_ROWS))
+    if L.page > pages then L.page = pages end
+    L.viewBtn:SetText(L.VIEW_TITLES[state.laborView or "best"] or L.VIEW_TITLES.best)
+    L.pageLabel:SetText(L.page .. " / " .. pages)
+    for row = 1, L.STAGE_ROWS do
+        local stage = stages[(L.page - 1) * L.STAGE_ROWS + row]
+        local widgets = L.stageRows[row]
+        if stage then
+            local lead = tostring(stage.name) .. (stage.group and ("  x" .. stage.count) or "")
+            widgets.label:SetText(lead .. "   " .. L.formatTime(stage.seconds) .. "   " .. fmt(tonumber(stage.lp) or 0) .. " LP   "
+                .. formatCopper(tonumber(stage.value) or 0) .. "   1 LP = " .. (tonumber(stage.perLp) and formatCopper(stage.perLp) or "-")
+                .. "   " .. (tonumber(stage.perHour) and (formatCopper(stage.perHour) .. "/h") or "-/h"))
+            widgets.remove:Show(not stage.group)
+            local open = L.editing == stage or (stage.group and L.editingGroup == stage.name)
+            widgets.edit:SetText(open and "Done" or (stage.group and "Items" or "Edit"))
+            widgets.edit:Show(true)
+        else
+            widgets.label:SetText(row == 1 and #stages == 0 and "No saved records yet." or "")
+            widgets.remove:Show(false)
+            widgets.edit:Show(false)
+        end
+    end
+end
+
+function L.createWindow()
+    local w = makePaperWindow("auction_income_labor" .. idSuffix, "Labor calculator", L.W, L.H, "laborX", "laborY")
+    L.win = w
+    L.loadMarket()
+    L.trackBtn = makeButton(w, "al_track", "Tracking: ON", 16, 44, 120, 28, L.toggleTracking)
+    L.splitBtn = makeButton(w, "al_split", "Split: auto", 142, 44, 110, 28, L.toggleSplit)
+    makeButton(w, "al_new", "New record", 258, 44, 110, 28, L.newRecordClick)
+    makeButton(w, "al_cancel", "Discard", 374, 44, 80, 28, L.cancel)
+    L.ignoreBtn = makeButton(w, "al_ignore", "Don't track", 460, 44, 104, 28, L.toggleIgnore)
+    makeButton(w, "al_market", "Market", 570, 44, 74, 28, L.reloadMarket)
+    L.stateLabel = makeLabel(w, "al_state", "", 16, 80, L.W - 32, 22, 14)
+    makeLabel(w, "al_name_h", "Name:", 16, 112, 46, 20, 13)
+    L.nameEdit = makeEdit(w, "al_name", 62, 108, 170, 26)
+    makeLabel(w, "al_lp_h", "LP:", 242, 112, 26, 20, 13)
+    L.lpEdit = makeEdit(w, "al_lp", 268, 108, 70, 26)
+    makeLabel(w, "al_gold_h", "Gold +/-:", 348, 112, 64, 20, 13)
+    L.goldEdit = makeEdit(w, "al_gold", 412, 108, 80, 26)
+    makeButton(w, "al_save", "Save", 500, 108, 110, 26, L.save)
+    makeLabel(w, "al_items_h", "Gained (+) / used (-)", 16, 142, 270, 20, 13)
+    makeLabel(w, "al_count_h", "count", 296, 142, 60, 20, 13)
+    makeLabel(w, "al_price_h", "gold each", 362, 142, 84, 20, 13)
+    for row = 1, L.ROWS do
+        local y = 164 + (row - 1) * 25
+        L.rows[row] = {
+            label = makeLabel(w, "al_row_" .. row, "", 16, y + 2, 274, 20, 13),
+            count = makeEdit(w, "al_count_" .. row, 296, y, 60, 23),
+            price = makeEdit(w, "al_price_" .. row, 362, y, 84, 23),
+            total = makeLabel(w, "al_total_" .. row, "", 452, y + 2, 200, 20, 13),
+        }
+    end
+    L.waitLabel = makeLabel(w, "al_wait", "", 16, 416, L.W - 32, 20, 13)
+    L.resultLabel = makeLabel(w, "al_result", "", 16, 438, L.W - 32, 22, FONT_SIZE.MIDDLE or 16)
+    L.viewBtn = makeButton(w, "al_view", "View: best per LP", 16, 468, 170, 26, L.cycleView)
+    makeLabel(w, "al_stages_h", "Saved records", 196, 472, 200, 20, 14)
+    makeButton(w, "al_prev", "<", 470, 468, 34, 26, function() L.turnPage(-1) end)
+    L.pageLabel = makeLabel(w, "al_page", "1 / 1", 508, 472, 70, 20, 13, ALIGN.CENTER)
+    makeButton(w, "al_next", ">", 582, 468, 34, 26, function() L.turnPage(1) end)
+    for row = 1, L.STAGE_ROWS do
+        local widgets = {}
+        local rowY = 500 + (row - 1) * 22
+        widgets.label = makeLabel(w, "al_stage_" .. row, "", 16, rowY, L.W - 124, 20, 13)
+        widgets.edit = makeButton(w, "al_stage_ed_" .. row, "Edit", L.W - 102, rowY - 1, 50, 20, function() L.toggleEdit(row) end)
+        widgets.remove = makeButton(w, "al_stage_rm_" .. row, "X", L.W - 46, rowY - 1, 26, 20, function() L.deleteStage(row) end)
+        L.stageRows[row] = widgets
+    end
+    L.statusLabel = makeLabel(w, "al_status", "", 16, 500 + L.STAGE_ROWS * 22 + 4, L.W - 32, 20, 13)
+    w:Show(false)
+end
+
+function L.toggle()
+    if not L.win then return end
+    local show = not L.win:IsVisible()
+    if show then L.refresh(true) end
+    L.win:Show(show)
+end
+
+-- Called from OnUpdate: settles spends, counts playing time of the running
+-- record (not while idle or with the game closed), saves every 15 seconds.
+function L.tick(ms)
+    local spend = L.pending
+    if spend and (ms - spend.ms >= L.WINDOW_MS or (spend.task and spend.vocation and ms - spend.ms >= L.SETTLE_MS)) then
+        L.settle()
+    end
+    local index = 1
+    while index <= #L.recent do
+        local entry = L.recent[index]
+        if ms - entry.ms > L.WINDOW_MS then
+            -- Used without labor: belongs to the next activity.
+            table.remove(L.recent, index)
+            L.held[#L.held + 1] = entry
+        else
+            index = index + 1
+        end
+    end
+    index = 1
+    while index <= #L.held do
+        local entry = L.held[index]
+        if ms - entry.ms > L.HOLD_MS then
+            table.remove(L.held, index)
+            if state.session then L.bump(state.session.used, entry.id, entry.count) end
+        else
+            index = index + 1
+        end
+    end
+    if not state.session or state.laborOff then L.lastTickMs = nil return end
+    if L.lastTickMs then
+        local delta = ms - L.lastTickMs
+        local busy = state.laborSplit == "manual" or (L.lastLaborMs and ms - L.lastLaborMs <= L.IDLE_MS)
+        if delta > 0 and delta < 5000 and busy then
+            L.activeMs = L.activeMs + delta
+            L.gapMs = L.gapMs + delta
+        end
+    end
+    L.lastTickMs = ms
+    if L.win and L.win:IsVisible() and ms - (L.lastRefreshMs or 0) >= 1000 then
+        L.lastRefreshMs = ms
+        L.refresh()
+    end
+    if ms - L.lastSaveMs >= 15000 then
+        L.lastSaveMs = ms
+        L.flushTime()
+        save()
+    end
+end
+
 
 retire = function()
     if not alive then return end
     alive = false
+    if L.win then pcall(function() L.win:Show(false) end) end
     for _, key in ipairs({"mainWin", "debugWin", "archiveWin", "floatingBtn"}) do
         local widget = ui[key]
         if widget then pcall(function() widget:Show(false) end) end
@@ -2135,6 +3183,8 @@ local function onEvent(event, ...)
     if not stillActive() then return end
     local args = packArgs(...)
     debugNote(event, dumpArgs(args))
+    local okLabor, laborErr = pcall(L.onEvent, event, args)
+    if not okLabor then log("Labor tracking error: " .. tostring(laborErr)) end
     if event == "PLAYER_MONEY" then
         onMoney(args)
     elseif event == "AUCTION_BOUGHT_BY_SOMEONE" then
@@ -2223,6 +3273,7 @@ end
 local function OnUpdate()
     if not alive then return end
     local ms = nowMs()
+    pcall(L.tick, ms)
     if #pendingDeltas > 0 then
         local index = 1
         while index <= #pendingDeltas do
@@ -2268,6 +3319,8 @@ local function OnLoad()
     if not ok then log("Window failed: " .. tostring(err)) end
     ok, err = pcall(createDebugWindow)
     if not ok then log("Debug window failed: " .. tostring(err)) end
+    ok, err = pcall(L.createWindow)
+    if not ok then log("Labor window failed: " .. tostring(err)) end
     ok, err = pcall(createArchiveWindow)
     if not ok then log("Archive window failed: " .. tostring(err)) end
     api:DoIn(200, function()
@@ -2285,6 +3338,7 @@ local function OnUnload()
     if ui.mainWin then ui.mainWin:Show(false) end
     if ui.debugWin then ui.debugWin:Show(false) end
     if ui.archiveWin then ui.archiveWin:Show(false) end
+    if L.win then L.win:Show(false) end
     if ui.floatingBtn then ui.floatingBtn:Show(false) end
     if ui.mailBtn then
         ui.mailBtn:Show(false)

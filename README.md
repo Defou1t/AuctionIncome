@@ -24,6 +24,20 @@ Counts auction income **only** for the items you pick (for example Weapon / Armo
 - **Item IDs / Debug** window: drop an item to see its ID, list the IDs of everything in your bag.
 - Manual entry for anything the addon could not see.
 
+## Labor calculator (1.9.0)
+
+The **Labor** button in the main window opens a calculator that answers "what is one labor point worth in each activity, and is it cheaper to make or to buy?".
+
+- **Records itself.** Tracking is on all game long; every labor spend goes into the current record and a new record starts when the activity changes. An activity is **vocation + loot type**: `Logging (bundle)` (stumps), `Alchemy` (geode harvest), `Alchemy (craft)` (shards into points), `Mining (loot)`, `Fishing` (worm fishing has no vocation, it is recognised by its catch).
+- A record holds labor, play time, items received within 8 s of a spend (+) and items used for it (−: craft materials, bait). Mob loot, quest rewards and vendor purchases are left out. Gold that drops together with the labor (opening purses, Larceny) is added to the record.
+- Stumps lit under a geode wait for the next geode harvest and count as its cost.
+- Time: the walk to the next activity belongs to it; after 10 minutes without labor the clock stops (AFK).
+- **Every field is editable**: name, LP, gold +/- (e.g. a trade pack paid 6–8 hours later) and, per item, count (0 removes the row) and price of one piece — `0.04`, `0,04`, `4s`, `1g 20s`, `-47`. One **Save** applies them. Saved records open with **Edit**.
+- **Prices**: your own (set) → market → average of your own auction deals. **Market prices** come from [sermeatball.com](https://sermeatball.com) (7-day auction averages): double-click `update-prices.cmd` in the addon folder, then press **Market** in the window. Addons cannot go online, so the download runs outside the game.
+- **Views**: best gold per LP, newest, **by activity** (all records of one activity summed; **Items** shows how many of each item one action and 100 LP bring — shards and points per geode).
+- **Don't track** switches off junk activities (one or two random actions) for good; **Track again** undoes it.
+- **Split: auto / manual** — in manual one record runs until **New record**. **Tracking ON/OFF** pauses, **Discard** drops the running record.
+
 ## How it detects things
 
 | What | How |
@@ -55,6 +69,15 @@ Counts auction income **only** for the items you pick (for example Weapon / Armo
 - Каждая продажа и покупка сохраняется с датой и временем; статистика переживает перезапуск игры и обновление аддона.
 - **New period** (два нажатия за 5 секунд) — закрыть текущую статистику в архив и начать заново; **Archives** — прошлые периоды с итогами.
 - **Item IDs / Debug** — ID предмета и всего содержимого сумки.
+
+**Калькулятор очков работы** (кнопка **Labor**, версия 1.9.0):
+
+- Пишет всю игру сам и делит на записи по занятию = профессия + вид добычи: `Logging (bundle)` (пеньки), `Alchemy` (жеоды), `Alchemy (craft)` (шарды в поинты), `Fishing` и т. д. Сменили занятие — новая запись.
+- В записи: ОР, время, полученные предметы (+), израсходованные (−: материалы, черви), золото с кошельков (Larceny). Лут с мобов и награды заданий не считаются. Подожжённые пеньки входят в затраты следующего сбора жеод.
+- Все поля правятся: имя, ОР, Gold +/- (например оплата паков), количество и цена штуки (`4s`, `0.04`, `1g 20s`) — и одна кнопка **Save**.
+- Цены: своя → рынок с sermeatball.com (`update-prices.cmd` в папке аддона, затем кнопка **Market**) → средняя ваших сделок.
+- **View**: лучшие за 1 ОР / новые / по занятиям; **Items** — сколько предметов в среднем за действие и за 100 ОР.
+- **Don't track** — отключить мусорное занятие, **Track again** — вернуть.
 
 Аддон запоминает лот при выставлении (предмет, количество, залог), ловит событие продажи, сопоставляет деньги из почты с продажей, а вернувшийся непроданный лот записывает как потерянный залог. Покупка на аукционе — списание денег и новое письмо; сумма привязывается к предмету, когда вы забираете его из почты.
 
