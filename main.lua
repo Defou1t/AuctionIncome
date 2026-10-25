@@ -4,7 +4,7 @@ local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
     desc = "Counts auction income and purchase spending only for the items you choose.",
-    version = "1.9.2"
+    version = "1.9.3"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -369,7 +369,7 @@ local function debugNote(kind, text)
     if not state.debug then return end
     -- MAIL_INBOX_UPDATE repeats the same arguments many times a second.
     -- Item links carry ~250 characters of state; the id is enough here.
-    local key = kind .. " " .. (tostring(text):gsub("|i(%d+),[%w,]*;?", "i%1"))
+    local key = kind .. " " .. (tostring(text):gsub("|i(%d+)[^;'|]*;?", "i%1"))
     if key == lastDebugKey then return end
     lastDebugKey = key
     table.insert(debugLog, clean(now().text .. " " .. key))
@@ -963,20 +963,18 @@ end
 
 -- Picks the waiting auction purchase that fits this item best: the one
 -- closest to its average price per unit, or the oldest for a new item.
+-- The newest waiting auction spend whose price per piece is plausible: mail
+-- is usually taken right after buying, and the queue also holds purchases of
+-- untracked items (closest-to-average used to pick weeks-old ones).
 local function takeAuctionSpend(item, count)
     local _, _, avg = buyStats(item)
-    local bestIndex, bestDiff
-    for index, spend in ipairs(state.auctionSpends) do
-        local unit = (tonumber(spend.amount) or 0) / math.max(count, 1)
-        if not avg then
-            bestIndex = bestIndex or index
-        elseif unit >= avg * C.AUCTION_UNIT_MIN and unit <= avg * C.AUCTION_UNIT_MAX then
-            local diff = math.abs(unit - avg)
-            if not bestDiff or diff < bestDiff then bestIndex, bestDiff = index, diff end
+    for index = #state.auctionSpends, 1, -1 do
+        local unit = (tonumber(state.auctionSpends[index].amount) or 0) / math.max(count, 1)
+        if not avg or (unit >= avg * C.AUCTION_UNIT_MIN and unit <= avg * C.AUCTION_UNIT_MAX) then
+            return table.remove(state.auctionSpends, index)
         end
     end
-    if not bestIndex then return nil end
-    return table.remove(state.auctionSpends, bestIndex)
+    return nil
 end
 
 -- The purchase mail appeared: the spend just before it was an auction buy.
@@ -1080,6 +1078,10 @@ local function onItemAdded(args)
     local count = math.max(math.floor(tonumber(args[2]) or 1), 1)
     local task = tonumber(args[3])
     local item = trackedById(state.buyItems, id)
+    if task == C.MAIL_ITEM_TASK then
+        debugNote("BUY-MAIL", "id " .. tostring(id) .. " x" .. count .. (item and " tracked" or " not tracked")
+            .. ", waiting auction spends " .. #state.auctionSpends)
+    end
     if not item then
         local sellItem = trackedById(state.items, id)
         if sellItem and task == C.MAIL_ITEM_TASK then onListingReturned(sellItem, count) end
@@ -1088,6 +1090,7 @@ local function onItemAdded(args)
     local ms = nowMs()
     local cost = claimSpend(ms, C.BUY_PAIR_MS)
     if cost then
+        debugNote("BAG", "+" .. count .. " " .. tostring(item.name) .. " paired with -" .. fmt(cost) .. " just spent (shop)")
         recordBuy(item, count, cost, "shop")
         return
     end
@@ -1184,6 +1187,16 @@ local function addManual()
     local copper = fmt(gold * 10000)
     if state.mode == "buy" then
         local t = now()
+        -- The same amount waiting as an auction purchase: this is it (dated
+        -- when it was bought, and it cannot be paired a second time later).
+        for index = #state.auctionSpends, 1, -1 do
+            local spend = state.auctionSpends[index]
+            if math.abs((tonumber(spend.amount) or 0) - tonumber(copper)) <= 1 then
+                table.remove(state.auctionSpends, index)
+                t = {text = spend.at, day = spend.day, epoch = spend.epoch}
+                break
+            end
+        end
         table.insert(state.buys, {
             item = item.name, itemId = tostring(item.id or ""), count = fmt(count), cost = copper,
             at = t.text, day = t.day, epoch = t.epoch, src = "manual",
@@ -3338,7 +3351,10 @@ local function createListener()
     ui.listener = api.Interface:CreateEmptyWindow("auction_income_listener" .. idSuffix)
     function ui.listener:OnEvent(event, ...)
         local ok, err = pcall(onEvent, event, ...)
-        if not ok then log("Event " .. tostring(event) .. " failed: " .. tostring(err)) end
+        if not ok then
+            log("Event " .. tostring(event) .. " failed: " .. tostring(err))
+            debugNote("ERROR", tostring(event) .. ": " .. tostring(err))
+        end
     end
     ui.listener:SetHandler("OnEvent", ui.listener.OnEvent)
     ui.listener:Show(true)
