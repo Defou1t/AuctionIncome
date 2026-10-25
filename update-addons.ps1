@@ -1,4 +1,4 @@
-# Updates Auction Income and Raid & Fish Tools from their GitHub releases
+﻿# Updates Auction Income and Raid & Fish Tools from their GitHub releases
 # without touching your records:
 #  - records live outside the addon folders (Addon\auction_income_*.lua,
 #    Addon\raidfish_data.lua) and are never overwritten;
@@ -6,6 +6,8 @@
 #  - before anything changes, the addon folders and data files are copied to
 #    Addon\_backups\<date time>\.
 # Only addons you already have are updated (-Install adds missing ones).
+# Auction Income is also added where Raid & Fish Tools is installed: the Fish
+# Tracker moved into it (Raid Tools 1.4.0 / Auction Income 1.10.0).
 #   powershell -ExecutionPolicy Bypass -File update-addons.ps1
 param(
     [string]$AddonDir = (Join-Path ([Environment]::GetFolderPath("MyDocuments")) "AAClassic\Addon"),
@@ -15,7 +17,7 @@ $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $addons = @(
-    @{ Name = "AuctionIncome"; Repo = "Defou1t/AuctionIncome"; Data = @("auction_income_*.lua"); Keep = @() },
+    @{ Name = "AuctionIncome"; Repo = "Defou1t/AuctionIncome"; Data = @("auction_income_*.lua"); Keep = @(); AlsoFor = "RaidFishTools" },
     @{ Name = "RaidFishTools"; Repo = "Defou1t/RaidFishTools"; Data = @("raidfish_data.lua"); Keep = @("whitelist.txt") }
 )
 
@@ -41,7 +43,9 @@ try {
     foreach ($a in $addons) {
         $dir = Join-Path $AddonDir $a.Name
         $have = Get-Version (Join-Path $dir "main.lua")
-        if (-not $have -and -not $Install) { Write-Host "$($a.Name): not installed, skipped (-Install to add it)"; continue }
+        $alsoFor = $a.AlsoFor -and (Test-Path (Join-Path $AddonDir "$($a.AlsoFor)\main.lua"))
+        if (-not $have -and -not $Install -and -not $alsoFor) { Write-Host "$($a.Name): not installed, skipped (-Install to add it)"; continue }
+        if (-not $have -and $alsoFor) { Write-Host "$($a.Name): added, it now holds the Fish Tracker" }
 
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$($a.Repo)/releases/latest" -Headers @{ "User-Agent" = "aac-addon-update" }
         $latest = $release.tag_name

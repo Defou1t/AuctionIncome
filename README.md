@@ -40,6 +40,14 @@ The **Labor** button in the main window opens a calculator that answers "what is
 - **Don't track** switches off junk activities (one or two random actions) for good; **Track again** undoes it.
 - **Split: auto / manual** — in manual one record runs until **New record**. **Tracking ON/OFF** pauses, **Discard** drops the running record.
 
+## Fish Tracker (1.10.0)
+
+Moved here from Raid & Fish Tools (now Raid Tools 1.4.0); based on Fish Track Reborn v2.2 by **Wagasez**, inspired by Usb, via Norrina-Hub by **Norrina**. **Fish: On/Off** in the main window.
+
+- Target a fish (Marlin, Tuna, Sailfish, Sturgeon, Sunfish, Carp, Eel, Arowana, …): its action with a timer and Strength Contest show under it. A second panel (**W**) follows the watch / track target.
+- Fish marked 1–9 get a 150 s countdown after death; your boat's Owner's Mark gets one too.
+- Light on the 32-bit client: only the position of a shown panel is updated every frame (and re-anchored only when it moved a pixel), buffs and timers 10 times a second, markers twice a second, unit info only when the target changes; every widget is touched only when its text, icon or visibility changes. **Off** does nothing at all. An error inside the tracker switches only the tracker off until the next start.
+
 ## How it detects things
 
 | What | How |
@@ -59,9 +67,9 @@ The **Labor** button in the main window opens a calculator that answers "what is
 
 ## Data and updating
 
-`Documents\AAClassic\Addon\auction_income_data.lua` — outside the addon folder, so updates never touch it. Auction records are written at once; the labor calculator writes at most every 5 s (1.9.2: up to 1.9.1 every event rewrote the whole file and every save re-read it to check for a second running copy, churning memory of the 32-bit client). Delete it with the game closed to start over.
+`Documents\AAClassic\Addon\auction_income_data.lua` — outside the addon folder, so updates never touch it. Auction records are written at once; the labor calculator writes at most every 15 s (1.10.0; 1.9.2: up to 1.9.1 every event rewrote the whole file and every save re-read it to check for a second running copy, churning memory of the 32-bit client). 1.10.0 also stops building a date every frame and formatting event arguments when the debug log is off. Delete it with the game closed to start over.
 
-**Update:** double-click `update-addons.cmd` in the addon folder. It backs up the addon folders and data files to `Addon\_backups\<date>`, then installs the latest GitHub releases of Auction Income and Raid & Fish Tools (only the ones you have). Unzipping a release over the folder works too.
+**Update:** double-click `update-addons.cmd` in the addon folder. It backs up the addon folders and data files to `Addon\_backups\<date>`, then installs the latest GitHub releases of Auction Income and Raid Tools (only the ones you have; Auction Income is added where Raid & Fish Tools is installed, since it now holds the Fish Tracker). Unzipping a release over the folder works too.
 
 Обновление: дважды кликните `update-addons.cmd` в папке аддона — сначала копия в `Addon\_backups\<дата>`, потом последние версии Auction Income и Raid & Fish Tools (только установленные). Записи лежат вне папки аддона и не затираются.
 
@@ -85,6 +93,8 @@ The **Labor** button in the main window opens a calculator that answers "what is
 - Цены: своя → рынок с sermeatball.com (`update-prices.cmd` в папке аддона, затем кнопка **Market**) → средняя ваших сделок.
 - **View**: лучшие за 1 ОР / новые / по занятиям; **Items** — сколько предметов в среднем за действие и за 100 ОР.
 - **Don't track** — отключить мусорное занятие, **Track again** — вернуть.
+
+**Fish Tracker** (1.10.0, переехал из Raid & Fish Tools; кнопка **Fish: On/Off**): возьмите рыбу в цель — под ней действие рыбы с таймером и Strength Contest, панель **W** — под наблюдаемой целью; таймеры 150 с у мёртвых рыб с номером и Owner's Mark лодки. Каждый кадр двигается только позиция панели, баффы — 10 раз в секунду; **Off** не делает ничего.
 
 Аддон запоминает лот при выставлении (предмет, количество, залог), ловит событие продажи, сопоставляет деньги из почты с продажей, а вернувшийся непроданный лот записывает как потерянный залог. Покупка на аукционе — списание денег и новое письмо; сумма привязывается к предмету, когда вы забираете его из почты.
 

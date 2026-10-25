@@ -3,8 +3,8 @@ local api = require("api")
 local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
-    desc = "Counts auction income and purchase spending only for the items you choose.",
-    version = "1.9.3"
+    desc = "Counts auction income and purchase spending only for the items you choose; labor calculator; fish tracker.",
+    version = "1.10.0"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -29,8 +29,9 @@ C.LOG_ROWS = 8
 C.MAX_RECORDS = 3000
 C.MAX_OTHER = 200
 C.MAX_DEBUG = 500
--- Data written at most every 5 s, the debug log every 15 s (1.9.2).
-C.SAVE_EVERY_MS, C.DEBUG_FLUSH_MS = 5000, 15000
+-- Labor data written at most every 15 s, the debug log every 15 s (1.10.0;
+-- the data file is ~150 KB and serialising it is the costliest thing we do).
+C.SAVE_EVERY_MS, C.DEBUG_FLUSH_MS = 15000, 15000
 C.MAX_ARGS = 12
 -- Lowest share of the sale price we still accept as "this mail paid that
 -- sale" (the auction house keeps a commission).
@@ -111,6 +112,8 @@ local state = {
     feeRatio = "",
     mailEventsSeen = false,
     debug = false,
+    -- Fish Tracker (fish_tracker.lua) on / off.
+    fishTracker = true,
     buttonX = 40,
     buttonY = 320,
 }
@@ -358,6 +361,7 @@ local function load()
     if type(loaded.laborIgnore) == "table" then state.laborIgnore = loaded.laborIgnore end
     if type(loaded.mailEventsSeen) == "boolean" then state.mailEventsSeen = loaded.mailEventsSeen end
     if type(loaded.debug) == "boolean" then state.debug = loaded.debug end
+    if type(loaded.fishTracker) == "boolean" then state.fishTracker = loaded.fishTracker end
     for _, key in ipairs({"buttonX", "buttonY", "winX", "winY", "dbgX", "dbgY"}) do
         if tonumber(loaded[key]) then state[key] = tonumber(loaded[key]) end
     end
@@ -1126,6 +1130,8 @@ local function onSpend(amount)
     table.insert(recentSpends, {amount = amount, ms = ms, when = now()})
 end
 
+local lastExpireMs = -100000
+
 local function expireBuyState(ms)
     local index = 1
     while index <= #pendingArrivals do
@@ -1147,6 +1153,10 @@ local function expireBuyState(ms)
             index = index + 1
         end
     end
+    -- Lots and auction purchases expire after days: checked once a minute
+    -- (now() builds a date table and strings, too much for every frame).
+    if ms - lastExpireMs < 60000 then return end
+    lastExpireMs = ms
     local nowEpoch = tonumber(now().epoch) or 0
     index = 1
     while index <= #state.listings do
@@ -1587,13 +1597,24 @@ local function newPeriod()
     end
 end
 
+-- Fish Tracker on / off (it lives in fish_tracker.lua).
+local function toggleFish()
+    state.fishTracker = not state.fishTracker
+    if ui.fish then ui.fish.setEnabled(state.fishTracker) end
+    if ui.fishBtn then ui.fishBtn:SetText(state.fishTracker and "Fish: On" or "Fish: Off") end
+    save()
+    setStatus(state.fishTracker and "Fish Tracker on: target a fish." or "Fish Tracker off.")
+end
+
 local function createMainWindow()
     ui.mainWin = makePaperWindow("auction_income_main" .. idSuffix, "Auction Income", C.WIN_W, C.WIN_H, "winX", "winY")
 
-    ui.sellModeBtn = makeButton(ui.mainWin, "ai_mode_sell", "Selling", 16, 42, 130, 26, function() setMode("sell") end)
-    ui.buyModeBtn = makeButton(ui.mainWin, "ai_mode_buy", "Buying", 152, 42, 130, 26, function() setMode("buy") end)
-    makeButton(ui.mainWin, "ai_labor", "Labor", 288, 42, 100, 26, function() L.toggle() end)
-    ui.periodLabel = makeLabel(ui.mainWin, "ai_period", "", 396, 46, C.WIN_W - 412, 20, 13, ALIGN.RIGHT)
+    ui.sellModeBtn = makeButton(ui.mainWin, "ai_mode_sell", "Selling", 16, 42, 120, 26, function() setMode("sell") end)
+    ui.buyModeBtn = makeButton(ui.mainWin, "ai_mode_buy", "Buying", 142, 42, 120, 26, function() setMode("buy") end)
+    makeButton(ui.mainWin, "ai_labor", "Labor", 268, 42, 90, 26, function() L.toggle() end)
+    ui.fishBtn = makeButton(ui.mainWin, "ai_fish", "", 364, 42, 90, 26, function() toggleFish() end)
+    ui.fishBtn:SetText(state.fishTracker and "Fish: On" or "Fish: Off")
+    ui.periodLabel = makeLabel(ui.mainWin, "ai_period", "", 460, 46, C.WIN_W - 476, 20, 13, ALIGN.RIGHT)
 
     local gridY, colX, colW = 76, 100, 128
     for column, period in ipairs(PERIODS) do
@@ -3285,7 +3306,7 @@ function L.tick(ms)
         L.lastRefreshMs = ms
         L.refresh()
     end
-    if ms - L.lastSaveMs >= 15000 then
+    if ms - L.lastSaveMs >= 60000 then
         L.lastSaveMs = ms
         L.flushTime()
         saveLater()
@@ -3297,6 +3318,7 @@ retire = function()
     if not alive then return end
     alive = false
     if L.win then pcall(function() L.win:Show(false) end) end
+    if ui.fish then pcall(ui.fish.hide) end
     for _, key in ipairs({"mainWin", "debugWin", "archiveWin", "floatingBtn"}) do
         local widget = ui[key]
         if widget then pcall(function() widget:Show(false) end) end
@@ -3311,7 +3333,7 @@ end
 local function onEvent(event, ...)
     if not stillActive() then return end
     local args = packArgs(...)
-    debugNote(event, dumpArgs(args))
+    if state.debug then debugNote(event, dumpArgs(args)) end
     local okLabor, laborErr = pcall(L.onEvent, event, args)
     if not okLabor then log("Labor tracking error: " .. tostring(laborErr)) end
     if event == "PLAYER_MONEY" then
@@ -3405,6 +3427,15 @@ end
 local function OnUpdate()
     if not alive then return end
     local ms = nowMs()
+    if ui.fish then
+        local okFish, fishErr = pcall(ui.fish.update, ms)
+        if not okFish then
+            -- A broken tracker must not stop the rest: switched off for this session.
+            log("Fish Tracker error: " .. tostring(fishErr))
+            pcall(ui.fish.hide)
+            ui.fish = nil
+        end
+    end
     pcall(L.tick, ms)
     if #pendingDeltas > 0 then
         local index = 1
@@ -3458,6 +3489,13 @@ local function OnLoad()
     if not ok then log("Labor window failed: " .. tostring(err)) end
     ok, err = pcall(createArchiveWindow)
     if not ok then log("Archive window failed: " .. tostring(err)) end
+    local okFish, fishModule = pcall(require, "AuctionIncome/fish_tracker")
+    if okFish and type(fishModule) == "table" and fishModule.init then
+        ok, err = pcall(fishModule.init, idSuffix, state.fishTracker)
+        if ok then ui.fish = fishModule else log("Fish Tracker failed to start: " .. tostring(err)) end
+    else
+        log("Fish Tracker not loaded: " .. tostring(fishModule))
+    end
     api:DoIn(200, function()
         local success, buttonErr = pcall(createFloatingButton)
         if not success then log("Button failed: " .. tostring(buttonErr)) end
@@ -3475,6 +3513,7 @@ local function OnUnload()
     if ui.archiveWin then ui.archiveWin:Show(false) end
     if L.win then L.win:Show(false) end
     if ui.floatingBtn then ui.floatingBtn:Show(false) end
+    if ui.fish then pcall(ui.fish.hide) end
     if ui.mailBtn then
         ui.mailBtn:Show(false)
         ui.mailBtn = nil

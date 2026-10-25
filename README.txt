@@ -1,5 +1,5 @@
-Auction Income 1.9.3 - ArcheAge Classic addon
-=============================================
+Auction Income 1.10.0 - ArcheAge Classic addon
+==============================================
 Авторы / Authors: Ako/Defou1t
 
 [RU] Считает доход с продажи на аукционе ТОЛЬКО тех предметов, которые вы
@@ -93,6 +93,19 @@ Auction Income 1.9.3 - ArcheAge Classic addon
   пока не нажмёте New record. New record - закрыть текущую запись сейчас.
   Discard - выбросить текущую (2 клика), X - удалить сохранённую (2 клика).
 
+FISH TRACKER (кнопка "Fish: On/Off" в главном окне; до 1.10.0 был в Raid & Fish
+Tools, основан на Fish Track Reborn v2.2 by Wagasez, inspired by Usb)
+- Возьмите рыбу в цель (Marlin, Tuna, Sailfish, Sturgeon, Sunfish, Carp, Eel,
+  Arowana, ...) - под ней иконка её действия с таймером и Strength Contest.
+  Вторая такая же панель (W) - под наблюдаемой целью (watch target).
+- Рыбы с номером 1-9 (sign) после смерти получают таймер 150 с по центру
+  экрана; Owner's Mark на вашей лодке - свой таймер там же.
+- Нагрузка минимальная: каждый кадр двигается только позиция показанной
+  панели (и только если сместилась на пиксель), баффы и таймеры - 10 раз в
+  секунду, номера рыб - 2 раза в секунду; без рыбы в цели - почти ничего.
+  "Fish: Off" - не делает вообще ничего. Ошибка внутри трекера выключает
+  только его до перезапуска, остальной аддон работает.
+
 КАК ЭТО РАБОТАЕТ
 - Выставление лота: аддон запоминает предмет, количество и залог (1% цены).
 - Продажа: игра присылает событие о проданном лоте (имя и цена), количество
@@ -117,13 +130,13 @@ Auction Income 1.9.3 - ArcheAge Classic addon
 
 ОБНОВЛЕНИЕ
 Дважды кликните update-addons.cmd в папке аддона: скачает последние версии
-Auction Income и Raid & Fish Tools (только установленные), сначала сохранив
+Auction Income и Raid Tools (только установленные), сначала сохранив
 копию в Addon\_backups\<дата>. Записи хранятся вне папки аддона и не
 затираются. Можно и вручную: распаковать новую версию поверх.
 
 ДАННЫЕ
-Статистика хранится в Документы\AAClassic\Addon\auction_income_data.lua и
-сохраняется при каждом изменении - она переживает перезапуск игры и
+Статистика хранится в Документы\AAClassic\Addon\auction_income_data.lua:
+записи аукциона пишутся сразу, калькулятор ОР - раз в 15 секунд. Она переживает перезапуск игры и
 обновление аддона (файл лежит вне папки аддона). Чтобы начать с нуля -
 удалите этот файл при выключенной игре.
 
@@ -138,6 +151,11 @@ the in-game Addons window, click the "Auction $" button (Shift-drag moves it);
 if the client lets addons reach the mailbox, the same button sits next to its
 bottom buttons.
 
+Fish Tracker: "Fish: On/Off" in the main window. Target a fish to see its
+action and Strength Contest buffs with timers under it (W = watch target),
+150 s countdowns for dead marked fish and your boat's Owner's Mark. Only the
+overlay position is updated every frame; buffs 10 times a second.
+
 Use: Selling / Buying switch the list. "New period" (click twice within 5 s) archives the current statistics and starts over; "Archives" lists past periods. Drag a bag item onto a slot to track
 it, right-click a slot to stop. "-" / "+" change the number of slots
 (1-24; "-" only removes an empty last slot). "Item IDs / Debug" shows item IDs.
@@ -151,6 +169,6 @@ mail, paired with the tracked item when it is taken from the mail.
 Limits: sales made while you are offline are not seen (add them manually).
 After updating from a version below 1.5.0, restart the game once.
 
-Data: Documents\AAClassic\Addon\auction_income_data.lua, saved on every
-change; it survives game restarts and addon updates. Delete it (game closed)
+Data: Documents\AAClassic\Addon\auction_income_data.lua (auction records
+saved at once, the labor calculator every 15 s); it survives game restarts and addon updates. Delete it (game closed)
 to reset.
