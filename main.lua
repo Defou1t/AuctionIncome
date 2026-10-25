@@ -4,7 +4,7 @@ local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
     desc = "Counts auction income and purchase spending only for the items you choose.",
-    version = "1.9.1"
+    version = "1.9.2"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -28,7 +28,9 @@ C.BAG_ROWS = 10
 C.LOG_ROWS = 8
 C.MAX_RECORDS = 3000
 C.MAX_OTHER = 200
-C.MAX_DEBUG = 1000
+C.MAX_DEBUG = 500
+-- Data written at most every 5 s, the debug log every 15 s (1.9.2).
+C.SAVE_EVERY_MS, C.DEBUG_FLUSH_MS = 5000, 15000
 C.MAX_ARGS = 12
 -- Lowest share of the sale price we still accept as "this mail paid that
 -- sale" (the auction house keeps a commission).
@@ -264,20 +266,44 @@ end
 -- file as its own, and a copy that finds another owner retires for good.
 local instanceId, alive, lastOwnerCheckMs, idSuffix, retire = "", true, -100000, "", nil
 
+-- The owner sits in a tiny file of its own: up to 1.9.1 the whole data file
+-- (100 KB) was read and parsed on every save and every 2 s just to check it,
+-- churning memory of the 32-bit client.
+local OWNER_FILE = "auction_income_owner.lua"
+local saveDirty, lastWriteMs = false, -100000
+
 local function ownedByOther()
-    local ok, onDisk = pcall(api.File.Read, api.File, DATA_FILE)
+    local ok, onDisk = pcall(api.File.Read, api.File, OWNER_FILE)
     return ok and type(onDisk) == "table" and onDisk.owner ~= nil and tostring(onDisk.owner) ~= instanceId
 end
 
-local function save()
+local function writeNow()
+    saveDirty = false
     if not alive then return end
     if ownedByOther() then
         if retire then retire() end
         return
     end
+    lastWriteMs = nowMs()
+    -- Kept in the data file too, so a pre-1.9.2 copy still running retires.
     state.owner = instanceId
     local ok, err = pcall(api.File.Write, api.File, DATA_FILE, state)
     if not ok then log("Save failed: " .. tostring(err)) end
+end
+
+-- Auction records are rare and must survive a crash: written at once.
+local function save()
+    writeNow()
+end
+
+-- The labor calculator changes data many times a minute: written at most
+-- every C.SAVE_EVERY_MS (OnUpdate), at once after a click, and on unload.
+local function saveLater()
+    saveDirty = true
+end
+
+local function flushSave(ms)
+    if saveDirty and (not ms or ms - lastWriteMs >= C.SAVE_EVERY_MS) then writeNow() end
 end
 
 local function stillActive()
@@ -342,7 +368,8 @@ local refreshDebug
 local function debugNote(kind, text)
     if not state.debug then return end
     -- MAIL_INBOX_UPDATE repeats the same arguments many times a second.
-    local key = kind .. " " .. tostring(text)
+    -- Item links carry ~250 characters of state; the id is enough here.
+    local key = kind .. " " .. (tostring(text):gsub("|i(%d+),[%w,]*;?", "i%1"))
     if key == lastDebugKey then return end
     lastDebugKey = key
     table.insert(debugLog, clean(now().text .. " " .. key))
@@ -626,6 +653,7 @@ local function makeButton(parent, id, text, x, y, width, height, callback)
         if not alive then return end
         local ok, err = pcall(callback)
         if not ok then log("Error: " .. tostring(err)) end
+        flushSave()
     end
     button:SetHandler("OnClick", button.OnClick)
     button:Show(true)
@@ -2540,7 +2568,7 @@ function L.migrateClaims()
     for _, claim in ipairs(claims) do L.payout(tonumber(claim.manualGold) or 0, 1) end
     if #claims > 0 then
         log(#claims .. " pack payment record(s) moved into the pack record.")
-        save()
+        saveLater()
     end
 end
 
@@ -2641,7 +2669,7 @@ function L.settle()
     if not spend then return end
     L.pending = nil
     L.commit(spend)
-    save()
+    saveLater()
     L.refresh()
 end
 
@@ -2678,7 +2706,7 @@ function L.onEvent(event, args)
         end
         -- Settled in L.tick, once its loot (and so its task) is known.
         L.pending = spend
-        return save()
+        return saveLater()
     elseif event == "ACTABILITY_EXPERT_CHANGED" then
         local vocation, diff = clean(args[2] or "?"), tonumber(args[3])
         if not diff or diff <= 0 then return end
@@ -2716,7 +2744,7 @@ function L.onEvent(event, args)
         local id, count, task = linkId(args[1]), math.max(tonumber(args[2]) or 1, 1), tonumber(args[3])
         if id and task == L.MAIL_TASK and L.PAYOUT_ITEMS[fmt(id)] then
             L.payout(nil, nil, id, count)
-            save()
+            saveLater()
             return L.refresh()
         end
         if not id or task == L.MAIL_TASK or task == L.FROM_BACK_TASK then return end
@@ -2758,7 +2786,7 @@ function L.onEvent(event, args)
     else
         return
     end
-    save()
+    saveLater()
     L.refresh()
 end
 
@@ -2778,14 +2806,14 @@ end
 function L.toggleTracking()
     state.laborOff = not state.laborOff or nil
     if state.laborOff then L.pending = nil end
-    save()
+    saveLater()
     L.setStatus(state.laborOff and "Tracking paused: labor is not recorded." or "Tracking on.")
     L.refresh()
 end
 
 function L.toggleSplit()
     state.laborSplit = state.laborSplit == "manual" and "auto" or "manual"
-    save()
+    saveLater()
     L.setStatus(state.laborSplit == "manual"
         and "Manual: one record until you press New record (name it in Name and press Save)."
         or "Auto: a new record starts when the activity changes.")
@@ -2803,7 +2831,7 @@ function L.newRecordClick()
     else
         L.setStatus("The next labor starts a new record.")
     end
-    save()
+    saveLater()
     L.refresh(true)
 end
 
@@ -2812,7 +2840,7 @@ function L.cancel()
     if not L.confirm("cancel", "Discard the running record without saving?") then return end
     state.session, L.pending, L.lastSpend = nil, nil, nil
     L.activeMs, L.gapMs = 0, 0
-    save()
+    saveLater()
     L.setStatus("Record discarded.")
     L.refresh(true)
 end
@@ -2826,7 +2854,7 @@ function L.toggleIgnore()
     for index, ignored in ipairs(state.laborIgnore) do
         if ignored == name then
             table.remove(state.laborIgnore, index)
-            save()
+            saveLater()
             L.setStatus("'" .. name .. "' is tracked again.")
             return L.refresh(true)
         end
@@ -2838,7 +2866,7 @@ function L.toggleIgnore()
         state.session, L.pending, L.lastSpend = nil, nil, nil
         L.activeMs, L.gapMs = 0, 0
     end
-    save()
+    saveLater()
     L.setStatus("'" .. name .. "' is not tracked any more. Select one of its records and press Track again to undo.")
     L.refresh(true)
 end
@@ -2954,7 +2982,7 @@ function L.save()
         end
     end
     if not live and not summary then L.restamp(s) end
-    save()
+    saveLater()
     L.refresh(true)
     if #problems > 0 then
         L.setStatus("Not understood: " .. table.concat(problems, ", ") .. ". Price of ONE piece: 0.04 or 4s or 1g 20s")
@@ -2973,7 +3001,7 @@ function L.deleteStage(index)
         if candidate == stage then table.remove(state.stages, i) break end
     end
     if L.editing == stage then L.editing = nil end
-    save()
+    saveLater()
     L.setStatus("Record deleted.")
     L.refresh(true)
 end
@@ -3004,7 +3032,7 @@ function L.cycleView()
         if name == view then view = L.VIEWS[index % #L.VIEWS + 1] break end
     end
     state.laborView, L.page = view, 1
-    save()
+    saveLater()
     L.refresh()
 end
 
@@ -3247,7 +3275,7 @@ function L.tick(ms)
     if ms - L.lastSaveMs >= 15000 then
         L.lastSaveMs = ms
         L.flushTime()
-        save()
+        saveLater()
     end
 end
 
@@ -3377,7 +3405,8 @@ local function OnUpdate()
     end
     local ok, err = pcall(expireBuyState, ms)
     if not ok then log("Purchase check failed: " .. tostring(err)) end
-    if debugDirty and ms - lastDebugFlushMs >= 3000 then
+    flushSave(ms)
+    if debugDirty and ms - lastDebugFlushMs >= C.DEBUG_FLUSH_MS then
         lastDebugFlushMs = ms
         flushDebug()
     end
@@ -3393,7 +3422,9 @@ local function OnLoad()
     if state.periodStart == "" then state.periodStart = earliestRecordTime() or now().text end
     -- Claim the data file at once, so an older copy still running stops.
     state.owner = instanceId
+    pcall(api.File.Write, api.File, OWNER_FILE, {owner = instanceId})
     pcall(api.File.Write, api.File, DATA_FILE, state)
+    lastWriteMs = nowMs()
     local okDebug, existing = pcall(api.File.Read, api.File, DEBUG_FILE)
     if okDebug and type(existing) == "table" and type(existing.lines) == "table" then debugLog = existing.lines end
     lastMoney = currentMoney()
@@ -3432,12 +3463,14 @@ local function OnUnload()
         ui.mailBtn:Show(false)
         ui.mailBtn = nil
     end
-    save()
+    flushSave()
     flushDebug()
     if retire then retire() end
 end
 
 addon.OnLoad = OnLoad
 addon.OnUnload = OnUnload
+-- Writes pending changes now; for the test harness (the client never calls it).
+addon.FlushData = function() flushSave() end
 
 return addon

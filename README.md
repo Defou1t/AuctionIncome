@@ -57,9 +57,13 @@ The **Labor** button in the main window opens a calculator that answers "what is
 - Stack size is known only for lots listed while the addon was running; older lots are recorded as x1 (the money is still right).
 - After updating from a version below 1.5.0, restart the game once (older versions left a copy running after a reload from the Addons window).
 
-## Data
+## Data and updating
 
-`Documents\AAClassic\Addon\auction_income_data.lua`, saved on every change. Delete it with the game closed to start over.
+`Documents\AAClassic\Addon\auction_income_data.lua` — outside the addon folder, so updates never touch it. Auction records are written at once; the labor calculator writes at most every 5 s (1.9.2: up to 1.9.1 every event rewrote the whole file and every save re-read it to check for a second running copy, churning memory of the 32-bit client). Delete it with the game closed to start over.
+
+**Update:** double-click `update-addons.cmd` in the addon folder. It backs up the addon folders and data files to `Addon\_backups\<date>`, then installs the latest GitHub releases of Auction Income and Raid & Fish Tools (only the ones you have). Unzipping a release over the folder works too.
+
+Обновление: дважды кликните `update-addons.cmd` в папке аддона — сначала копия в `Addon\_backups\<дата>`, потом последние версии Auction Income и Raid & Fish Tools (только установленные). Записи лежат вне папки аддона и не затираются.
 
 ---
 
