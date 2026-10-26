@@ -4,7 +4,7 @@ local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
     desc = "Counts auction income and purchase spending only for the items you choose; labor calculator; fish tracker.",
-    version = "1.10.0"
+    version = "1.10.1"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon

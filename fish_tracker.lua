@@ -24,7 +24,10 @@ local FISH_NAMES = {
     ["Marlin"] = true, ["Blue Marlin"] = true, ["Tuna"] = true, ["Blue Tuna"] = true,
     ["Bluefin Tuna"] = true, ["Sunfish"] = true, ["Sailfish"] = true, ["Sturgeon"] = true,
     ["Pink Pufferfish"] = true, ["Carp"] = true, ["Arowana"] = true, ["Pufferfish"] = true,
-    ["Eel"] = true, ["Pink Marlin"] = true, ["Treasure Mimic"] = true,
+    ["Eel"] = true, ["Pink Marlin"] = true,
+    -- Also a land mob (1.10.1: it got the panel everywhere): shown only
+    -- while it has a fishing buff.
+    ["Treasure Mimic"] = "buffs",
     ["철갑상어"] = true, ["청새치"] = true, ["참다랑어"] = true, ["돛새치"] = true, ["개복치"] = true,
     ["鲟鱼"] = true, ["枪鱼"] = true, ["蓝鳍金枪鱼"] = true, ["旗鱼"] = true, ["翻车鱼"] = true
 }
@@ -168,15 +171,6 @@ local function updateOverlay(o, token, fallbackX, fallbackY)
         show(o.win, false)
         return nil
     end
-    o.token, o.fallbackX, o.fallbackY = token, fallbackX, fallbackY
-    place(o)
-    local health = unit:UnitHealth(token)
-    if health and health <= 0 then
-        show(o.strengthIcon, false); setText(o.strengthTime, "")
-        setIcon(o.icon, DEAD_ICON); setText(o.actionTime, "")
-        show(o.win, true)
-        return id, info, true
-    end
     local action, contest, owner
     for index = 1, unit:UnitBuffCount(token) or 0 do
         local buff = unit:UnitBuff(token, index)
@@ -186,6 +180,19 @@ local function updateOverlay(o, token, fallbackX, fallbackY)
             elseif ACTION_BUFFS[buffId] then action = buff
             elseif buffId == CONTEST_BUFF then contest = buff end
         end
+    end
+    if FISH_NAMES[info.name] == "buffs" and not (action or contest or owner) then
+        show(o.win, false)
+        return nil
+    end
+    o.token, o.fallbackX, o.fallbackY = token, fallbackX, fallbackY
+    place(o)
+    local health = unit:UnitHealth(token)
+    if health and health <= 0 then
+        show(o.strengthIcon, false); setText(o.strengthTime, "")
+        setIcon(o.icon, DEAD_ICON); setText(o.actionTime, "")
+        show(o.win, true)
+        return id, info, true
     end
     if action then
         setIcon(o.icon, action.buff_id, action.path)

@@ -1,4 +1,4 @@
-Auction Income 1.10.0 - ArcheAge Classic addon
+Auction Income 1.10.1 - ArcheAge Classic addon
 ==============================================
 Авторы / Authors: Ako/Defou1t
 
