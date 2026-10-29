@@ -4,7 +4,7 @@ local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
     desc = "Counts auction income and purchase spending only for the items you choose; labor calculator; fish tracker.",
-    version = "1.10.1"
+    version = "1.10.2"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -2450,6 +2450,7 @@ function L.flushTime()
     if whole > 0 then
         s.seconds = fmt((tonumber(s.seconds) or 0) + whole)
         L.activeMs = L.activeMs - whole * 1000
+        return true
     end
 end
 
@@ -3308,8 +3309,8 @@ function L.tick(ms)
     end
     if ms - L.lastSaveMs >= 60000 then
         L.lastSaveMs = ms
-        L.flushTime()
-        saveLater()
+        -- AFK (no play time counted): nothing to write.
+        if L.flushTime() then saveLater() end
     end
 end
 
