@@ -35,7 +35,7 @@ The **Labor** button in the main window opens a calculator that answers "what is
 - Items used up without labor (points spent elsewhere, festival coins) are nobody's cost. Labor with neither vocation nor loot (sport fishing, −18) gets its own record, `Labor (18 LP)`.
 - Time: the walk to the next activity belongs to it; after 10 minutes without labor the clock stops (AFK).
 - **Every field is editable**: name, LP, gold +/- (e.g. a trade pack paid 6–8 hours later) and, per item, count (0 removes the row) and price of one piece — `0.04`, `0,04`, `4s`, `1g 20s`, `-47`. One **Save** applies them. Saved records open with **Edit**.
-- **Prices**: your own (set) → market → average of your own auction deals. **Market prices** come from [sermeatball.com](https://sermeatball.com) (7-day auction averages): double-click `update-prices.cmd` in the addon folder, then press **Market** in the window. Addons cannot go online, so the download runs outside the game.
+- **Prices**: your own (set) → market → average of your own auction deals. **Market prices** come from [sermeatball.com](https://sermeatball.com) (7-day auction averages; the regrade panel uses the latest price): double-click `update-prices.cmd` in the addon folder, then press **Market** in the window. Addons cannot go online, so the download runs outside the game.
 - **Views**: best gold per LP, newest, **by activity** (all records of one activity summed; **Items** shows how many of each item one action and 100 LP bring — shards and points per geode).
 - **Don't track** switches off junk activities (one or two random actions) for good; **Track again** undoes it.
 - **Split: auto / manual** — in manual one record runs until **New record**. **Tracking ON/OFF** pauses, **Discard** drops the running record.
@@ -47,6 +47,15 @@ Moved here from Raid & Fish Tools (now Raid Tools 1.4.0); based on Fish Track Re
 - Target a fish (Marlin, Tuna, Sailfish, Sturgeon, Sunfish, Carp, Eel, Arowana, …): its action with a timer and Strength Contest show under it. A second panel (**W**) follows the watch / track target.
 - Fish marked 1–9 get a 150 s countdown after death; your boat's Owner's Mark gets one too.
 - Light on the 32-bit client: only the position of a shown panel is updated every frame (and re-anchored only when it moved a pixel), buffs and timers 10 times a second, markers twice a second, unit info only when the target changes; every widget is touched only when its text, icon or visibility changes. **Off** does nothing at all. An error inside the tracker switches only the tracker off until the next start.
+
+## Regrade panel (1.11.0)
+
+**Regrade: On/Off** in the main window. Open the Enchant window on its regrade tab and a panel appears beside it (inspired by the attempt log of [regrades.thebouncycow.com](https://regrades.thebouncycow.com/)):
+
+- Auction prices of what is in the slots — the item, the scroll and the charm — plus gold per try, **item + scroll + charm**, and **one try** (scroll + charm + gold).
+- Prices: your own (set) → latest auction price → 7-day average, both from [sermeatball.com](https://sermeatball.com) (`update-prices.cmd`). Gear has one market price for all grades, so type your own into the box and press **Save prices**; an emptied box goes back to the market price. Your own prices are shared with the labor calculator.
+- A table of the tries made while the window is open: number, grade before → after, result (Success, Great success, Fail, Downgrade, Break) and the cost of the try, with counts and the total spent on top. It is cleared when the window closes.
+- The slots are read 4 times a second while the window is open, nothing while it is closed; results come from the client's `GRADE_ENCHANT_RESULT` event.
 
 ## How it detects things
 
@@ -95,6 +104,8 @@ Moved here from Raid & Fish Tools (now Raid Tools 1.4.0); based on Fish Track Re
 - **Don't track** — отключить мусорное занятие, **Track again** — вернуть.
 
 **Fish Tracker** (1.10.0, переехал из Raid & Fish Tools; кнопка **Fish: On/Off**): возьмите рыбу в цель — под ней действие рыбы с таймером и Strength Contest, панель **W** — под наблюдаемой целью; таймеры 150 с у мёртвых рыб с номером и Owner's Mark лодки. Каждый кадр двигается только позиция панели, баффы — 10 раз в секунду; **Off** не делает ничего.
+
+**Панель регрейда** (1.11.0; кнопка **Regrade: On/Off**): рядом с окном улучшения — цены предмета, свитка и талисмана из слотов, золото за попытку, их сумма и цена одной попытки. Цены: своя → последняя на аукционе → средняя за 7 дней (sermeatball.com). У снаряжения одна рыночная цена на все грейды — впишите свою и нажмите **Save prices**. Таблица попыток (грейд было → стало, результат, цена) живёт, пока окно открыто.
 
 Аддон запоминает лот при выставлении (предмет, количество, залог), ловит событие продажи, сопоставляет деньги из почты с продажей, а вернувшийся непроданный лот записывает как потерянный залог. Покупка на аукционе — списание денег и новое письмо; сумма привязывается к предмету, когда вы забираете его из почты.
 

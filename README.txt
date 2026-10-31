@@ -1,4 +1,4 @@
-Auction Income 1.10.2 - ArcheAge Classic addon
+Auction Income 1.11.0 - ArcheAge Classic addon
 ==============================================
 Авторы / Authors: Ako/Defou1t
 
@@ -106,6 +106,20 @@ Tools, основан на Fish Track Reborn v2.2 by Wagasez, inspired by Usb)
   "Fish: Off" - не делает вообще ничего. Ошибка внутри трекера выключает
   только его до перезапуска, остальной аддон работает.
 
+ПАНЕЛЬ РЕГРЕЙДА (1.11.0; кнопка "Regrade: On/Off" внизу главного окна)
+- Откройте окно улучшения (вкладка регрейда) - справа от него панель с
+  ценами того, что лежит в слотах: предмет, свиток, талисман (charm). Ниже:
+  золото за попытку, сумма предмет + свиток + талисман и цена одной попытки
+  (свиток + талисман + золото).
+- Цены: своя -> последняя цена на аукционе -> средняя за 7 дней (обе с
+  sermeatball.com: update-prices.cmd в папке аддона, затем перезагрузка аддона
+  или кнопка Market в окне Labor). У снаряжения на sermeatball одна цена на
+  все грейды - впишите свою цену в поле и нажмите "Save prices" (пустое поле -
+  вернуть рыночную). Свои цены общие с калькулятором ОР.
+- Таблица попыток, пока окно открыто: номер, грейд было -> стало, результат
+  (Success, Great success, Fail, Downgrade, Break) и цена попытки; сверху -
+  итог по результатам и сколько потрачено. Закрыли окно - таблица очищается.
+
 КАК ЭТО РАБОТАЕТ
 - Выставление лота: аддон запоминает предмет, количество и залог (1% цены).
 - Продажа: игра присылает событие о проданном лоте (имя и цена), количество
@@ -155,6 +169,15 @@ Fish Tracker: "Fish: On/Off" in the main window. Target a fish to see its
 action and Strength Contest buffs with timers under it (W = watch target),
 150 s countdowns for dead marked fish and your boat's Owner's Mark. Only the
 overlay position is updated every frame; buffs 10 times a second.
+
+Regrade panel (1.11.0): "Regrade: On/Off" in the main window. Beside the
+Enchant window (regrade tab): auction prices of the item, scroll and charm in
+its slots, gold per try, item + scroll + charm, and the cost of one try.
+Prices: your own -> latest auction price -> 7-day average (sermeatball.com,
+update-prices.cmd). Gear has one market price for all grades: type your own
+and press "Save prices" (an empty box goes back to the market price). A table
+of the tries made while the window is open (grade before -> after, result,
+cost) is cleared when it closes.
 
 Use: Selling / Buying switch the list. "New period" (click twice within 5 s) archives the current statistics and starts over; "Archives" lists past periods. Drag a bag item onto a slot to track
 it, right-click a slot to stop. "-" / "+" change the number of slots

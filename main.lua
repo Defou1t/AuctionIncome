@@ -3,8 +3,8 @@ local api = require("api")
 local addon = {
     name = "Auction Income",
     author = "Ako/Defou1t",
-    desc = "Counts auction income and purchase spending only for the items you choose; labor calculator; fish tracker.",
-    version = "1.10.2"
+    desc = "Counts auction income and purchase spending only for the items you choose; labor calculator; fish tracker; regrade costs.",
+    version = "1.11.0"
 }
 
 -- Kept at the Addon root, outside the addon folder, so replacing the addon
@@ -114,6 +114,8 @@ local state = {
     debug = false,
     -- Fish Tracker (fish_tracker.lua) on / off.
     fishTracker = true,
+    -- Regrade panel (regrade.lua) on / off.
+    regradePanel = true,
     buttonX = 40,
     buttonY = 320,
 }
@@ -362,6 +364,7 @@ local function load()
     if type(loaded.mailEventsSeen) == "boolean" then state.mailEventsSeen = loaded.mailEventsSeen end
     if type(loaded.debug) == "boolean" then state.debug = loaded.debug end
     if type(loaded.fishTracker) == "boolean" then state.fishTracker = loaded.fishTracker end
+    if type(loaded.regradePanel) == "boolean" then state.regradePanel = loaded.regradePanel end
     for _, key in ipairs({"buttonX", "buttonY", "winX", "winY", "dbgX", "dbgY"}) do
         if tonumber(loaded[key]) then state[key] = tonumber(loaded[key]) end
     end
@@ -1696,6 +1699,8 @@ local function createMainWindow()
     end)
     makeButton(ui.lowerPanel, "ai_new_period", "New period", 142, bottomY, 130, 26, function() newPeriod() end)
     makeButton(ui.lowerPanel, "ai_archives", "Archives", 278, bottomY, 110, 26, function() toggleArchiveWin() end)
+    ui.regradeBtn = makeButton(ui.lowerPanel, "ai_regrade", "", 394, bottomY, 120, 26, function() L.toggleRegrade() end)
+    ui.regradeBtn:SetText(state.regradePanel and "Regrade: On" or "Regrade: Off")
     ui.statusLabel = makeLabel(ui.lowerPanel, "ai_status", "", 16, bottomY + 32, C.WIN_W - 32, 22, 13)
 
     ui.mainWin:Show(false)
@@ -2206,7 +2211,9 @@ local EVENTS = {"PLAYER_MONEY", "AUCTION_BOUGHT_BY_SOMEONE", "AUCTION_BIDDEN", "
     -- Logged only: harvesting a geode spent labor but sent no ADDED_ITEM
     -- (2026-10-24), so the other ways of receiving things are watched.
     "ITEM_ACQUISITION_BY_LOOT", "MONEY_ACQUISITION_BY_LOOT", "LOOT_BAG_CLOSE", "LOOT_PACK_ITEM_BROADCAST",
-    "PLAYER_LIVING_POINT", "PLAYER_CONTRIBUTION_POINT", "PLAYER_AA_POINT"}
+    "PLAYER_LIVING_POINT", "PLAYER_CONTRIBUTION_POINT", "PLAYER_AA_POINT",
+    -- Regrade panel: the result of each try.
+    "GRADE_ENCHANT_RESULT"}
 for name in pairs(MAIL_EVENTS) do EVENTS[#EVENTS + 1] = name end
 for name in pairs(NOTICE_EVENTS) do EVENTS[#EVENTS + 1] = name end
 
@@ -2255,7 +2262,7 @@ L.TO_BACK_TASK, L.FROM_BACK_TASK = 16, 23
 -- Bundle (stumps) under geodes -> Alchemy, Auroria Mineral Water Pack on
 -- archeum trees -> Gathering.
 L.CARRY = {["35265"] = "Alchemy", ["18440"] = "Gathering"}
-L.MARKET_FILE, L.market = "auction_income_market.lua", {}
+L.MARKET_FILE, L.market, L.latest = "auction_income_market.lua", {}, {}
 L.VIEWS = {"best", "newest", "activity"}
 L.VIEW_TITLES = {best = "View: best per LP", newest = "View: newest", activity = "View: by activity"}
 
@@ -2310,13 +2317,15 @@ function L.hasTask(record, task)
     return false
 end
 
--- Market prices by item id (7-day auction average from sermeatball.com),
--- written by tools\update-prices.ps1 outside the game: addons cannot go online.
+-- Market prices by item id (7-day auction average from sermeatball.com, and
+-- since 1.11.0 the latest auction price for the regrade panel), written by
+-- tools\update-prices.ps1 outside the game: addons cannot go online.
 function L.loadMarket()
-    L.market, L.marketUpdated = {}, nil
+    L.market, L.latest, L.marketUpdated = {}, {}, nil
     local ok, data = pcall(api.File.Read, api.File, L.MARKET_FILE)
     if not ok or type(data) ~= "table" or type(data.items) ~= "table" then return false end
     L.market, L.marketUpdated = data.items, tostring(data.updated or "?")
+    if type(data.latest) == "table" then L.latest = data.latest end
     return true
 end
 
@@ -3314,12 +3323,57 @@ function L.tick(ms)
     end
 end
 
+-- ============================================================
+-- Regrade panel (regrade.lua): auction prices of the item, scroll and
+-- charm beside the client's Enchant window, and the tries made there.
+-- ============================================================
+
+-- One set by hand, else the latest auction price, else the 7-day average.
+function L.regradePrice(id)
+    local key = tostring(id)
+    local manual = tonumber(state.prices[key])
+    if manual then return manual, "set" end
+    local latest = tonumber(L.latest[key])
+    if latest then return latest, "latest" end
+    local average = tonumber(L.market[key])
+    if average then return average, "7-day" end
+    return nil
+end
+
+function L.marketNote()
+    if not L.marketUpdated then return "No market prices: run update-prices.cmd" end
+    return "Market prices of " .. L.marketUpdated
+end
+
+function L.toggleRegrade()
+    state.regradePanel = not state.regradePanel
+    if ui.regrade then ui.regrade.setEnabled(state.regradePanel) end
+    if ui.regradeBtn then ui.regradeBtn:SetText(state.regradePanel and "Regrade: On" or "Regrade: Off") end
+    save()
+    setStatus(state.regradePanel and "Regrade panel on: it shows beside the Enchant window." or "Regrade panel off.")
+end
+
+function L.startRegrade()
+    local ok, module = pcall(require, "AuctionIncome/regrade")
+    if not (ok and type(module) == "table" and module.init) then
+        log("Regrade panel not loaded: " .. tostring(module))
+        return
+    end
+    local context = {state = state, price = L.regradePrice, marketNote = L.marketNote, itemName = L.itemName,
+        formatCopper = formatCopper, goldText = L.goldText, money = L.money, trim = trim,
+        makeLabel = makeLabel, makeButton = makeButton, makeEdit = makeEdit, save = save,
+        note = debugNote, dump = dump}
+    local okInit, err = pcall(module.init, context, idSuffix, state.regradePanel)
+    if okInit then ui.regrade = module else log("Regrade panel failed to start: " .. tostring(err)) end
+end
+
 
 retire = function()
     if not alive then return end
     alive = false
     if L.win then pcall(function() L.win:Show(false) end) end
     if ui.fish then pcall(ui.fish.hide) end
+    if ui.regrade then pcall(ui.regrade.hide) end
     for _, key in ipairs({"mainWin", "debugWin", "archiveWin", "floatingBtn"}) do
         local widget = ui[key]
         if widget then pcall(function() widget:Show(false) end) end
@@ -3337,6 +3391,10 @@ local function onEvent(event, ...)
     if state.debug then debugNote(event, dumpArgs(args)) end
     local okLabor, laborErr = pcall(L.onEvent, event, args)
     if not okLabor then log("Labor tracking error: " .. tostring(laborErr)) end
+    if event == "GRADE_ENCHANT_RESULT" and ui.regrade then
+        local okRegrade, regradeErr = pcall(ui.regrade.onResult, args)
+        if not okRegrade then log("Regrade result error: " .. tostring(regradeErr)) end
+    end
     if event == "PLAYER_MONEY" then
         onMoney(args)
     elseif event == "AUCTION_BOUGHT_BY_SOMEONE" then
@@ -3437,6 +3495,14 @@ local function OnUpdate()
             ui.fish = nil
         end
     end
+    if ui.regrade then
+        local okRegrade, regradeErr = pcall(ui.regrade.update, ms)
+        if not okRegrade then
+            log("Regrade panel error: " .. tostring(regradeErr))
+            pcall(ui.regrade.hide)
+            ui.regrade = nil
+        end
+    end
     pcall(L.tick, ms)
     if #pendingDeltas > 0 then
         local index = 1
@@ -3497,6 +3563,7 @@ local function OnLoad()
     else
         log("Fish Tracker not loaded: " .. tostring(fishModule))
     end
+    pcall(L.startRegrade)
     api:DoIn(200, function()
         local success, buttonErr = pcall(createFloatingButton)
         if not success then log("Button failed: " .. tostring(buttonErr)) end
@@ -3515,6 +3582,7 @@ local function OnUnload()
     if L.win then L.win:Show(false) end
     if ui.floatingBtn then ui.floatingBtn:Show(false) end
     if ui.fish then pcall(ui.fish.hide) end
+    if ui.regrade then pcall(ui.regrade.hide) end
     if ui.mailBtn then
         ui.mailBtn:Show(false)
         ui.mailBtn = nil

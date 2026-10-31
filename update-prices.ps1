@@ -1,7 +1,8 @@
 # Downloads ArcheAge Classic auction prices from sermeatball.com (public API
 # of the fan site) into Addon\auction_income_market.lua, which Auction Income
-# reads for the labor calculator ("Market" button in the Labor window, or at
-# addon load). Addons cannot go online themselves, so run this outside the game.
+# reads for the labor calculator (7-day averages) and the regrade panel
+# (latest prices) - "Market" button in the Labor window, or at addon load.
+# Addons cannot go online themselves, so run this outside the game.
 #   powershell -ExecutionPolicy Bypass -File update-prices.ps1
 param(
     [string]$AddonDir = (Join-Path ([Environment]::GetFolderPath("MyDocuments")) "AAClassic\Addon"),
@@ -10,6 +11,7 @@ param(
 $ErrorActionPreference = "Stop"
 $api = "https://api.sermeatball.com/auction/market-items"
 $prices = [ordered]@{}
+$latest = [ordered]@{}
 $offset = 0
 $total = $null
 while ($true) {
@@ -27,6 +29,8 @@ while ($true) {
         if (-not $copper) { $copper = $row.latest_copper }
         if (-not $copper) { $copper = $row.avg_30d_copper }
         if ($copper) { $prices["$($row.item_id)"] = [string][math]::Round([double]$copper) }
+        # The latest auction price on its own, for the regrade panel.
+        if ($row.latest_copper) { $latest["$($row.item_id)"] = [string][math]::Round([double]$row.latest_copper) }
     }
     # Sorted by 30-day volume: once a page has no traded items the rest has none either.
     if ($traded -eq 0) { break }
@@ -37,9 +41,12 @@ while ($true) {
 $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add("{")
 $lines.Add("    updated = `"$(Get-Date -Format 'yyyy-MM-dd HH:mm')`",")
-$lines.Add("    source = `"sermeatball.com 7-day average, copper per piece`",")
+$lines.Add("    source = `"sermeatball.com, copper per piece: items = 7-day average, latest = latest price`",")
 $lines.Add("    items = {")
 foreach ($id in $prices.Keys) { $lines.Add("        [`"$id`"] = `"$($prices[$id])`",") }
+$lines.Add("    },")
+$lines.Add("    latest = {")
+foreach ($id in $latest.Keys) { $lines.Add("        [`"$id`"] = `"$($latest[$id])`",") }
 $lines.Add("    },")
 $lines.Add("}")
 $target = Join-Path $AddonDir "auction_income_market.lua"
